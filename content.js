@@ -693,6 +693,8 @@
     .events label[hidden], .evnone[hidden] { display: none; }
     .evsearch { width: 100%; box-sizing: border-box; }
     .evclear { margin: 0; white-space: nowrap; align-self: flex-start; }
+    .evtools { display: flex; gap: 14px; }
+    .events label.past { color: var(--muted, #888); }
     .evclear:disabled { color: var(--muted, #888); cursor: default; text-decoration: none; }
     .evbtn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .evmenu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; display: flex; flex-direction: column; gap: 8px; min-width: 300px; max-height: 60vh; overflow: auto;
@@ -1020,7 +1022,7 @@
       notify: d.notify || {},
       selected: Array.isArray(d.selected) ? d.selected : null,
       tab: d.tab, staffRole: d.staffRole, showAssigned: !!d.showAssigned, hideZero: !!d.hideZero, hideLast: !!d.hideLast, staffMode: d.staffMode === 'slot' ? 'slot' : 'person', theme: ['light', 'dark'].includes(d.theme) ? d.theme : 'auto',
-      showNeeded: !!d.showNeeded, showOther: !!d.showOther, showAges: d.showAges !== false,
+      showNeeded: !!d.showNeeded, showOther: !!d.showOther, showAges: d.showAges !== false, hidePast: d.hidePast !== false,
       reminded: d.reminded && typeof d.reminded === 'object' ? d.reminded : {},
     };
   })();
@@ -1029,7 +1031,7 @@
       staged: [...state.staged, ...state.parked].map((x) => ({ evId: x.evId, role: x.role, peopleId: x.peopleId, ...(x.remove ? { remove: true } : {}) })),
       notify: { subject: state.notify.subject, message: state.notify.message, bcc: state.notify.bcc },
       selected: state.events.length ? [...state.selected] : saved.selected,
-      tab: state.tab, staffRole: state.staffRole, showAssigned: state.showAssigned, hideZero: state.hideZero, hideLast: state.hideLast, staffMode: state.staffMode, theme: state.theme, showNeeded: state.showNeeded, showOther: state.showOther, showAges: state.showAges,
+      tab: state.tab, staffRole: state.staffRole, showAssigned: state.showAssigned, hideZero: state.hideZero, hideLast: state.hideLast, staffMode: state.staffMode, theme: state.theme, showNeeded: state.showNeeded, showOther: state.showOther, showAges: state.showAges, hidePast: state.hidePast,
       reminded: state.reminded,
     };
     try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(data)); } catch (e) { /* progress just won't persist */ }
@@ -1081,7 +1083,7 @@
     msg: { evs: null, aud: '0', allRoles: true, roles: new Set(), subject: '', message: '', bcc: false, confirming: false, sending: false, error: '', result: null },
     targetEdit: false, targetEdits: new Map(), targetConfirm: false, targetApplying: false, targetResult: null, copyFrom: 0, copyTo: 1,
     notify: { subject: saved.notify.subject || '', message: saved.notify.message || '', bcc: !!saved.notify.bcc, picks: new Map(), confirming: false, sending: false, error: '', result: null }, progress: '', error: '',
-    note: '', drafting: false, theme: saved.theme, staffMode: saved.staffMode, showNeeded: saved.showNeeded, showOther: saved.showOther, fill: null, onlyShort: false, hideZero: saved.hideZero, hideLast: saved.hideLast, showAges: saved.showAges, reminded: saved.reminded, sort: 'name', search: '', status: 'all', role: '', toast: '',
+    note: '', drafting: false, theme: saved.theme, staffMode: saved.staffMode, showNeeded: saved.showNeeded, showOther: saved.showOther, fill: null, onlyShort: false, hideZero: saved.hideZero, hideLast: saved.hideLast, showAges: saved.showAges, hidePast: saved.hidePast, reminded: saved.reminded, sort: 'name', search: '', status: 'all', role: '', toast: '',
   };
 
   const host = document.createElement('div');
@@ -1110,8 +1112,19 @@
   }
   function close() { root.hidden = true; launch.hidden = false; }
 
+  // An event is past once its last day is over. Past events are hidden from the picker unless asked for, and a
+  // hidden event is not loaded even if it is still ticked from an earlier visit.
+  function isPast(ev) {
+    const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(ev.date || '');
+    if (!m) return false;
+    const lastDay = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]) + Math.max(1, ev.days || 1) - 1);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return lastDay < today;
+  }
+  const shownEvents = () => (state.hidePast ? state.events.filter((ev) => !isPast(ev)) : state.events);
+
   async function load() {
-    const evs = state.events.filter((e) => state.selected.has(e.id));
+    const evs = shownEvents().filter((e) => state.selected.has(e.id));
     if (!evs.length) return;
     state.busy = true; state.error = ''; state.loaded = []; state.people = [];
     state.parked = [...state.staged, ...state.parked]; state.staged = [];
@@ -1186,23 +1199,29 @@
   const evMatches = (ev, q) => {
     if (!q) return true;
     const text = (e) => evLabel(e).toLowerCase();
-    if (state.events.some((e) => text(e).includes(q))) return text(ev).includes(q);
+    if (shownEvents().some((e) => text(e).includes(q))) return text(ev).includes(q);
     return q.split(/\s+/).every((w) => text(ev).includes(w));
   };
   function eventPicker() {
     const q = eventsCompact ? eventsQuery.trim().toLowerCase() : '';
-    const boxes = state.events.map((ev) => h('label', { 'data-ev': ev.id, hidden: !evMatches(ev, q) },
+    const list = shownEvents();
+    const boxes = list.map((ev) => h('label', { 'data-ev': ev.id, hidden: !evMatches(ev, q), class: isPast(ev) ? 'past' : '' },
       h('input', {
         type: 'checkbox', checked: state.selected.has(ev.id), disabled: state.busy,
         onchange: (e) => { e.target.checked ? state.selected.add(ev.id) : state.selected.delete(ev.id); saveDrafts(); if (eventsCompact) renderHeader(); else clearAll.disabled = state.busy || !state.selected.size; },
       }), evLabel(ev)));
     const clearAll = h('button', { class: 'lnk evclear', disabled: state.busy || !state.selected.size,
       onclick: () => { state.selected.clear(); saveDrafts(); renderHeader(); } }, 'Uncheck all');
-    if (!eventsCompact) return h('div', { class: 'events' }, boxes, clearAll);
-    const chosen = state.events.filter((ev) => state.selected.has(ev.id));
+    const pastCount = state.events.filter(isPast).length;
+    const pastToggle = pastCount ? h('button', { class: 'lnk evclear', disabled: state.busy,
+      title: state.hidePast ? 'Show events whose last day is over' : 'Hide events whose last day is over',
+      onclick: () => { state.hidePast = !state.hidePast; saveDrafts(); eventsCompact = false; renderHeader(); },
+    }, state.hidePast ? 'Show past (' + pastCount + ')' : 'Hide past') : null;
+    if (!eventsCompact) return h('div', { class: 'events' }, boxes, clearAll, pastToggle);
+    const chosen = list.filter((ev) => state.selected.has(ev.id));
     const label = !chosen.length ? 'Choose events'
       : chosen.length === 1 ? evLabel(chosen[0])
-        : chosen.length + ' of ' + state.events.length + ' events: ' + chosen.map(evShort).join(' · ');
+        : chosen.length + ' of ' + list.length + ' events: ' + chosen.map(evShort).join(' · ');
     return h('div', { class: 'events picker' },
       h('button', { class: 'evbtn', title: chosen.map(evLabel).join('\n'), onclick: () => {
         eventsOpen = !eventsOpen; eventsQuery = '';
@@ -1223,9 +1242,9 @@
             });
             e.target.parentElement.querySelector('.evnone').hidden = shown > 0;
           } }),
-        clearAll,
+        h('div', { class: 'evtools' }, clearAll, pastToggle),
         boxes,
-        h('div', { class: 'sub evnone', hidden: state.events.some((ev) => evMatches(ev, q)) }, 'No events match.')) : null);
+        h('div', { class: 'sub evnone', hidden: list.some((ev) => evMatches(ev, q)) }, list.length ? 'No events match.' : 'No upcoming events.')) : null);
   }
   // A click anywhere else closes the dropdown; a resize checks again whether the row fits.
   root.addEventListener('click', (e) => {
