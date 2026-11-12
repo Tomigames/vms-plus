@@ -31,14 +31,46 @@
     return res;
   }
 
+  // VMS answers one request per session at a time, so on very large events (Championship) requests queue up behind
+  // slow ones and its gateway gives up with a 502/503/504. Reads are safe to repeat: after such an error, all further
+  // reads go one at a time and the failed one is tried again after a pause.
+  let svcLimit = CONCURRENCY, svcActive = 0;
+  const svcWaiting = [];
+  async function svcSlot() {
+    while (svcActive >= svcLimit) await new Promise((r) => svcWaiting.push(r));
+    svcActive++;
+  }
+  function svcFree() {
+    svcActive--;
+    const next = svcWaiting.shift();
+    if (next) next();
+  }
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  const RETRY_WAITS = [2000, 6000, 15000];
+
   async function svc(method, params) {
     const q = Object.entries(params)
       .map(([k, v]) => k + '=' + encodeURIComponent(typeof v === 'string' ? JSON.stringify(v) : v))
       .join('&');
-    const res = await vfetch(SVC + method + '?' + q, {
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      credentials: 'same-origin',
-    });
+    let res;
+    for (let attempt = 0; ; attempt++) {
+      await svcSlot();
+      let failed = '';
+      try {
+        res = await vfetch(SVC + method + '?' + q, {
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          credentials: 'same-origin',
+        });
+        if ([500, 502, 503, 504].includes(res.status)) failed = 'HTTP ' + res.status;
+      } catch (e) {
+        if (Date.now() < blockedUntil) throw e; // rate limited: retrying would only extend the block
+        failed = e.message || 'network error';
+      } finally { svcFree(); }
+      if (!failed) break;
+      if (attempt >= RETRY_WAITS.length) throw new Error(method + ' failed (' + failed + ')');
+      svcLimit = 1;
+      await pause(RETRY_WAITS[attempt]);
+    }
     if (!res.ok) throw new Error(method + ' failed (HTTP ' + res.status + ')');
     let d;
     try {
@@ -485,7 +517,7 @@
     roles.forEach((role) => {
       const old = before && before.get(role.id + ':' + role.custom);
       if (old && only && !only.has(role.name.toLowerCase())) {
-        role.assigned = old.assigned; role.applicants = old.applicants; role.unchecked = old.unchecked;
+        role.assigned = old.assigned; role.applicants = old.applicants; role.unchecked = old.unchecked; role.readFailed = old.readFailed;
         return;
       }
       if (quiet.has(role)) role.unchecked = true;
@@ -500,8 +532,16 @@
       if (role.counts && role.counts.applicants === 0 && !odd.has(role)) return;
       needApplicants.push(role);
     });
+    // If VMS still cannot give one role's applicants after retrying, the event loads without them and says so,
+    // instead of failing as a whole.
     const direct = (role) => async () => {
-      role.applicants = await svc('GetUnassignedVolunteers', { eventID: ev.id, roleID: role.id, tab: 'Applicants', isCustom: role.custom });
+      try {
+        role.applicants = await svc('GetUnassignedVolunteers', { eventID: ev.id, roleID: role.id, tab: 'Applicants', isCustom: role.custom });
+        role.readFailed = false;
+      } catch (e) {
+        if (Date.now() < blockedUntil || /session expired/i.test(e.message)) throw e;
+        role.applicants = []; role.readFailed = true;
+      }
     };
     // Roles that may have someone hidden are read directly, together with their Hidden list.
     const oddOnes = needApplicants.filter((r) => odd.has(r)), plain = needApplicants.filter((r) => !odd.has(r));
@@ -1202,6 +1242,13 @@
     const top = mainEl.scrollTop;
     mainEl.replaceChildren();
     if (state.error) mainEl.append(h('div', { class: 'msg err' }, state.error));
+    const failedReads = [];
+    new Set(state.loaded.map((l) => l.src)).forEach((raw) => raw.roles.forEach((r) => {
+      if (r.readFailed) failedReads.push(r.name + ' (' + evShort(raw.ev) + ')');
+    }));
+    if (failedReads.length) mainEl.append(h('div', { class: 'msg err' },
+      'VMS could not send the applicant list for ' + failedReads.join(', ')
+      + ', even after retrying. Those roles show no applicants here; assigned volunteers are complete. Press Refresh to try again.'));
     if (!state.loaded.length) {
       mainEl.append(h('div', { class: 'msg' }, state.busy ? 'Working…'
         : 'Tick the events to view together, then press Load. Loading only reads from VMS. Nothing changes in VMS until you confirm it.'));
