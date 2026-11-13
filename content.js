@@ -2799,6 +2799,7 @@
     const failed = [];
     let ok = 0;
     const touched = new Map();
+    const placedNow = new Set();
     // Removals go first so that someone being moved is free before they are placed again.
     const ordered = [...state.staged.filter((x) => x.remove), ...state.staged.filter((x) => !x.remove)];
     for (const x of ordered) {
@@ -2837,8 +2838,19 @@
         }
         // On a multi-day event the person may already be in the role for another day.
         const srcRole = item.src.roles.find((r) => r.id === role.id && r.custom === role.custom);
-        const already = item.ev.multi && srcRole && (Array.isArray(srcRole.assigned) ? srcRole.assigned : []).some((v) => v.PeopleID === x.peopleId);
-        if (!already) await svcPost('PlaceCandidates', { eventID: vmsId, roleID: role.id, isCustom: role.custom, people: String(x.peopleId) });
+        // Staging several days at once places them on the first day and only adds a shift on the others: VMS refuses to
+        // place someone twice ("is already placed for this role"), and the loaded lists aren't re-read mid-batch.
+        const placedKey = vmsId + ':' + role.id + ':' + (role.custom ? 1 : 0) + ':' + x.peopleId;
+        const already = placedNow.has(placedKey)
+          || (item.ev.multi && srcRole && (Array.isArray(srcRole.assigned) ? srcRole.assigned : []).some((v) => v.PeopleID === x.peopleId));
+        if (!already) {
+          try {
+            await svcPost('PlaceCandidates', { eventID: vmsId, roleID: role.id, isCustom: role.custom, people: String(x.peopleId) });
+          } catch (e) {
+            if (!(item.ev.multi && /already placed/i.test(e.message))) throw e;
+          }
+        }
+        placedNow.add(placedKey);
         const day = vmsDate(item.ev.date);
         if (item.ev.days === 1 && day) {
           const rows = await svc('GetAssignedVolunteers', { eventID: vmsId, roleID: role.id, isCustom: role.custom, viewType: 'Event', day: 0 });
