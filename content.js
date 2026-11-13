@@ -337,6 +337,13 @@
   const dayGap = (a, b) => Math.round((b - a) / DAY_MS);
   const covers = (a, pos) => a.StartingPosition <= pos && pos < a.StartingPosition + (a.PositionsSpanned || 1);
   const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  // VMS writes an applicant's available days as two-letter codes, e.g. "Fr Sa Su". Empty means not stated.
+  const DAY_CODES = ['su', 'mo', 'tu', 'we', 'th', 'fr', 'sa'];
+  const availableDays = (v) => {
+    const t = typeof v.DaysAvailable === 'string' ? v.DaysAvailable.toLowerCase() : '';
+    const days = (t.match(/[a-z]{2}/g) || []).filter((c) => DAY_CODES.includes(c));
+    return days.length ? days : null;
+  };
   // Testing aid: VMS event ids listed here are split across every day of their schedule, not just the event's own days.
   const splitAll = () => {
     try { return new Set((JSON.parse(localStorage.getItem('vcDash.splitDays')) || []).map(Number)); } catch (e) { return new Set(); }
@@ -381,9 +388,14 @@
           const elsewhere = everyone.filter((v) => shiftsOf(v).length && !shiftsOf(v).some((a) => covers(a, pos)))
             .map((v) => ({ ...v, ID: v.PeopleID, Priority: '', otherDay: true }));
           const told = rows.filter((v) => v.Assignments.some((a) => a.IsNotified)).length;
+          // Applicants say which days they can come ("Fr Sa Su"); they are only offered on those days.
+          const code = DAY_CODES[date.getDay()];
+          const canCome = (v) => !availableDays(v) || availableDays(v).includes(code);
+          const applying = (Array.isArray(r.applicants) ? r.applicants : []).filter(canCome);
           return { ...r, assigned: rows,
-            applicants: [...(Array.isArray(r.applicants) ? r.applicants : []), ...elsewhere],
-            counts: r.counts ? { ...r.counts, assigned: told, tentative: rows.length - told } : null };
+            applicants: [...applying, ...elsewhere],
+            counts: r.counts ? { ...r.counts, assigned: told, tentative: rows.length - told,
+              applicants: r.readFailed ? r.counts.applicants : applying.length } : null };
         }),
         appliedDates: raw.appliedDates, training: raw.training, lastSeason: raw.lastSeason, src: raw,
       };
@@ -575,6 +587,10 @@
 
   // ---------- Data model ----------
 
+  // FIRST's training report lists courses for every role a person holds, at any event. Only the required, unfinished
+  // courses for roles they hold at this event count here.
+  const owedTraining = (e) => (e && e.training ? e.training : []).filter((t) => t.required && !t.done
+    && e.assign.some((a) => a.role.toLowerCase() === cleanRole(t.role || '').toLowerCase()));
   function buildPeople(loaded) {
     const people = new Map();
     const get = (v) => {
@@ -645,7 +661,7 @@
       if (p.assignedAnywhere && evs.some((e) => e.assign.length === 0 && e.applied.length > 0)) p.flags.push('partial');
       const sets = evs.map((e) => e.assign.filter((a) => !a.admin).map((a) => a.role).sort().join('|')).filter(Boolean);
       if (new Set(sets).size > 1) p.flags.push('rolediff');
-      if (evs.some((e) => (e.training || []).some((t) => t.required && !t.done && t.assigned))) p.flags.push('training');
+      if (evs.some((e) => owedTraining(e).length)) p.flags.push('training');
       if ((p.raw.SignedConsentReleaseStatus || '') === 'Unsigned') p.flags.push('consent');
       if (evs.some((e) => e.lastSeason)) p.flags.push('returning');
     });
@@ -1311,8 +1327,9 @@
     let rows = [...names.values()].sort((a, b) => (b.key - a.key) || a.name.localeCompare(b.name));
     const isShort = (row) => row.per.some((r) => { if (!r) return false; const c = count(r); return c.target > 0 && c.assigned < c.target; });
     if (state.onlyShort) rows = rows.filter(isShort);
-    // A role with no target is only hidden if nobody is in it. While editing targets everything stays visible.
-    const inUse = (row) => row.per.some((r) => r && (r.admin || (r.counts && r.counts.target > 0) || r.assigned.length > 0));
+    // A role with no target is only hidden if nobody is in it or has applied. While editing targets everything stays visible.
+    const inUse = (row) => row.per.some((r) => r && (r.admin || (r.counts && (r.counts.target > 0 || r.counts.applicants > 0))
+      || r.assigned.length > 0 || r.applicants.some((v) => !v.otherDay)));
     const hiddenCount = state.hideZero && !state.targetEdit ? rows.filter((row) => !inUse(row)).length : 0;
     if (hiddenCount) rows = rows.filter(inUse);
 
@@ -1324,6 +1341,14 @@
       return t;
     }, { target: 0, assigned: 0, pending: 0, short: 0 }));
 
+    // A multi-day event is one VMS event shown as several day columns. Targets, invite links and applications belong
+    // to the whole event, so they are shown and edited in its first column only.
+    const firstCol = (i) => loaded.findIndex((l) => l.ev.vmsId === loaded[i].ev.vmsId) === i;
+    const daysOf = (i) => loaded.filter((l) => l.ev.vmsId === loaded[i].ev.vmsId).length;
+    const allDays = (i) => (daysOf(i) > 1 ? ' (all ' + daysOf(i) + ' days)' : '');
+    const firsts = loaded.map((l, i) => i).filter(firstCol);
+    if (!firsts.includes(state.copyFrom)) state.copyFrom = firsts[0] || 0;
+    if (!firsts.includes(state.copyTo) || state.copyTo === state.copyFrom) state.copyTo = firsts.find((i) => i !== state.copyFrom) || 0;
     const editing = state.targetEdit;
     const working = state.targetApplying;
     const edits = state.targetEdits;
@@ -1342,7 +1367,7 @@
     };
     const copyTargets = () => {
       const a = state.copyFrom, b = state.copyTo;
-      if (a === b || !loaded[a] || !loaded[b]) return;
+      if (a === b || !loaded[a] || !loaded[b] || loaded[a].ev.vmsId === loaded[b].ev.vmsId) return;
       names.forEach((row) => {
         const src = row.per[a], dst = row.per[b];
         if (!src || !dst || !src.counts || !dst.counts || src.admin || dst.admin) return;
@@ -1354,20 +1379,22 @@
       state.targetConfirm = false; renderMain();
     };
 
-    const cellActions = (ev, r) => {
+    const cellActions = (ev, r, i) => {
       const key = editKey(ev, r);
       const hidden = r.counts.hidden;
+      const span = allDays(i);
       return [
-        r.counts.invite ? h('button', { class: 'lnk', title: 'Copy the Express Volunteer sign-up link for this role', onclick: (e) => copyInvite(ev, r, e.currentTarget) }, 'Invite link') : null,
+        r.counts.invite ? h('button', { class: 'lnk', title: 'Copy the Express Volunteer sign-up link for this role' + span, onclick: (e) => copyInvite(ev, r, e.currentTarget) }, 'Invite link') : null,
         r.custom ? null : (state.toggleKey === key
           ? [h('button', { class: 'lnk', disabled: state.toggling, onclick: () => toggleApplications(ev, r, hidden) },
-              hidden ? 'Confirm: allow applications' : 'Confirm: stop applications'),
+              (hidden ? 'Confirm: allow applications' : 'Confirm: stop applications') + span),
             h('button', { class: 'lnk', onclick: () => { state.toggleKey = ''; renderMain(); } }, 'Cancel')]
-          : h('button', { class: 'lnk', onclick: () => { state.toggleKey = key; renderMain(); } }, hidden ? 'Allow applications' : 'Stop applications')),
+          : h('button', { class: 'lnk', title: span ? 'Applies to every day of this event' : '', onclick: () => { state.toggleKey = key; renderMain(); } },
+            (hidden ? 'Allow applications' : 'Stop applications') + span)),
       ];
     };
 
-    const cell = (ev, r) => {
+    const cell = (ev, r, i) => {
       if (!r) return h('td', { class: 'muted' }, '—');
       const c = count(r);
       const cls = c.target > 0 ? (c.assigned < c.target ? 'short' : 'full') : '';
@@ -1378,7 +1405,7 @@
       if (r.inactive) bits.push('inactive');
       const pending = edits.get(editKey(ev, r));
       return h('td', { class: cls },
-        editing && c.target != null
+        editing && c.target != null && firstCol(i)
           ? [h('span', { class: 'num' }, c.assigned + ' / '),
             h('input', { type: 'number', min: 0, max: 200, step: 1, class: 'tgt' + (pending ? ' dirty' : ''), disabled: working,
               value: pending ? pending.value : c.target, title: 'Target for ' + r.name,
@@ -1386,7 +1413,7 @@
           : h('a', { class: 'num', href: roleUrl(ev, r), target: '_blank', title: 'Open this role in VMS' },
             c.target == null ? c.assigned + (c.assigned === 1 ? ' person' : ' people') : c.assigned + ' / ' + c.target),
         bits.length ? h('div', { class: 'sub' }, bits.join(' · ')) : null,
-        !editing && !r.admin && r.counts ? h('div', {}, cellActions(ev, r)) : null);
+        !editing && !r.admin && r.counts && firstCol(i) ? h('div', {}, cellActions(ev, r, i)) : null);
     };
 
     const body = [];
@@ -1396,7 +1423,7 @@
         lastKey = row.key;
         body.push(h('tr', { class: 'group' }, h('td', { colSpan: loaded.length + 1 }, row.key ? 'Key roles' : 'Other roles')));
       }
-      body.push(h('tr', {}, h('td', {}, row.name), loaded.map(({ ev }, i) => cell(ev, row.per[i]))));
+      body.push(h('tr', {}, h('td', {}, row.name), loaded.map(({ ev }, i) => cell(ev, row.per[i], i))));
     });
 
     return h('div', {},
@@ -1415,13 +1442,13 @@
               state.newRole.open ? 'Close add role' : 'Add role'),
             h('button', { onclick: () => { state.targetEdit = true; state.targetResult = null; state.newRole.open = false; renderMain(); } }, 'Edit targets')]
           : [
-            loaded.length > 1 ? [
+            loaded.filter((l, i) => firstCol(i)).length > 1 ? [
               'Copy targets from ',
               h('select', { disabled: working, onchange: (e) => { state.copyFrom = Number(e.target.value); } },
-                loaded.map(({ ev }, i) => h('option', { value: i, selected: state.copyFrom === i }, evShort(ev)))),
+                loaded.map(({ ev }, i) => (firstCol(i) ? h('option', { value: i, selected: state.copyFrom === i }, evShort(ev) + allDays(i)) : null))),
               ' to ',
               h('select', { disabled: working, onchange: (e) => { state.copyTo = Number(e.target.value); } },
-                loaded.map(({ ev }, i) => h('option', { value: i, selected: state.copyTo === i }, evShort(ev)))),
+                loaded.map(({ ev }, i) => (firstCol(i) ? h('option', { value: i, selected: state.copyTo === i }, evShort(ev) + allDays(i)) : null))),
               h('button', { disabled: working, onclick: copyTargets }, 'Copy'),
             ] : null,
             state.targetConfirm
@@ -1443,9 +1470,10 @@
           loaded.map(({ ev }, i) => h('th', {}, evLabel(ev),
             h('small', {}, totals[i].assigned + ' / ' + totals[i].target + ' filled · ' + totals[i].short + ' roles short'
               + (totals[i].pending ? ' · ' + totals[i].pending + ' not notified' : '')),
-            h('div', {},
-              h('button', { class: 'lnk', onclick: (e) => copyInvite(ev, null, e.currentTarget) }, 'Event invite link'),
-              h('button', { class: 'lnk', title: 'Copy the QR code image and open VMS\'s QR code page', onclick: (e) => copyQr(ev, e.currentTarget) }, 'QR code')))))),
+            firstCol(i) ? h('div', {},
+              h('button', { class: 'lnk', title: allDays(i) ? 'One link for every day of this event' : '', onclick: (e) => copyInvite(ev, null, e.currentTarget) }, 'Event invite link'),
+              h('button', { class: 'lnk', title: 'Copy the QR code image and open VMS\'s QR code page', onclick: (e) => copyQr(ev, e.currentTarget) }, 'QR code'))
+              : h('small', {}, 'Links and targets: see ' + evShort(loaded[loaded.findIndex((l) => l.ev.vmsId === ev.vmsId)].ev)))))),
         h('tbody', {}, body)));
   }
 
@@ -1763,9 +1791,9 @@
     const out = [];
     state.loaded.forEach(({ ev }) => {
       const e = p.ev[ev.id];
-      (e && e.training ? e.training : []).forEach((t) => {
+      owedTraining(e).forEach((t) => {
         const line = (t.role ? t.role + ': ' : '') + t.course;
-        if (t.required && !t.done && t.assigned && !out.includes(line)) out.push(line);
+        if (!out.includes(line)) out.push(line);
       });
     });
     return out;
@@ -2264,7 +2292,7 @@
     if (state.hideZero) {
       names = names.filter((n) => loaded.some((l) => {
         const r = roleIn(l, n.name);
-        return r && ((r.counts && r.counts.target > 0) || r.assigned.length > 0
+        return r && ((r.counts && r.counts.target > 0) || r.assigned.length > 0 || r.applicants.some((v) => !v.otherDay)
           || state.staged.some((x) => x.evId === l.ev.id && x.role === n.name));
       }));
     }
@@ -2563,8 +2591,10 @@
           (() => {
             // With many events, count the days instead of listing them all; the full list is in the tooltip.
             const days = withRole.filter((l, i) => !!opts[i]).map((l) => evShort(l.ev));
-            const list = days.length > 3 ? days.length + ' of ' + withRole.length + ' days' : days.join(' and ');
-            return h('div', { class: 'sub', title: days.length > 3 ? days.join(', ') : '' }, why + ' · signed up for ' + list + (when ? ' on ' + fmtDay(when) : ''));
+            const list = days.length > 2 && days.length === withRole.length ? 'every day'
+              : days.length > 3 ? days.length + ' of ' + withRole.length + ' days'
+                : days.length > 2 ? days.slice(0, -1).join(', ') + ' and ' + days[days.length - 1] : days.join(' and ');
+            return h('div', { class: 'sub', title: days.length > 2 ? days.join(', ') : '' }, why + ' · signed up for ' + list + (when ? ' · applied ' + fmtDay(when) : ''));
           })()),
         h('div', { class: 'pflags' },
           (() => {
@@ -2945,12 +2975,27 @@
       }
       const usable = roles.filter((r) => !r.admin && !r.inactive).sort((a, b) => a.name.localeCompare(b.name));
       const setCount = usable.filter((r) => validTime(cfg.roles[r.name.toLowerCase()])).length;
+      // On a multi-day event, the first day's times can be copied to every other day in one click.
+      const sameEvent = state.loaded.filter((l) => l.ev.vmsId === ev.vmsId && l.ev.id !== ev.id);
+      const isFirstDay = ev.multi && state.loaded.find((l) => l.ev.vmsId === ev.vmsId).ev.id === ev.id;
+      const copyToOtherDays = () => {
+        sameEvent.forEach((l) => {
+          const to = cfgFor(l.ev.id);
+          to.start = cfg.start; to.end = cfg.end;
+          to.roles = JSON.parse(JSON.stringify(cfg.roles));
+        });
+        state.toast = 'Copied to ' + plural(sameEvent.length, 'other day') + '. Nothing changes in VMS until you apply.';
+        changed();
+        setTimeout(() => { state.toast = ''; render(); }, 2500);
+      };
       const bad = (t) => !!t && (t.start || t.end) && !validTime(t);
       return h('section', {},
         h('h2', {}, evLabel(ev)),
         h('div', { class: 'bar' }, h('strong', {}, 'Default shift'), timeInputs(cfg, changed),
           bad(cfg) ? chip('bad', 'Needs a start before the end, between 6am and 10pm') : null,
-          !cfg.start && !cfg.end ? h('span', { class: 'muted' }, 'Not set. Roles without their own time are left alone.') : null),
+          !cfg.start && !cfg.end ? h('span', { class: 'muted' }, 'Not set. Roles without their own time are left alone.') : null,
+          isFirstDay && sameEvent.length ? h('button', { title: 'Copy this day’s default and role times to the other days of this event', onclick: copyToOtherDays },
+            'Use these times on all ' + (sameEvent.length + 1) + ' days') : null),
         h('details', { open: setCount > 0 },
           h('summary', {}, 'Role-specific times (' + setCount + ' set)'),
           h('table', { class: 'narrow' }, h('tbody', {}, usable.map((r) => {
