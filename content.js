@@ -415,7 +415,8 @@
           const canCome = (v) => !availableDays(v) || availableDays(v).includes(code);
           const applying = (Array.isArray(r.applicants) ? r.applicants : []).filter(canCome);
           return { ...r, assigned: rows,
-            applicants: [...applying, ...elsewhere],
+            // Someone in the role on another day is only offered here if this is one of their available days too.
+            applicants: [...applying, ...elsewhere.filter(canCome)],
             counts: r.counts ? { ...r.counts, assigned: told, tentative: rows.length - told,
               applicants: r.readFailed ? r.counts.applicants : applying.length } : null };
         }),
