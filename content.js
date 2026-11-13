@@ -1345,7 +1345,16 @@
   // ----- Roles tab -----
 
   function rolesView() {
-    const loaded = state.loaded;
+    // Targets, invite links and applications belong to the whole VMS event (a role's target is the same on every day),
+    // so a multi-day event is one column here, with its counts for the whole event, not one column per day.
+    const loaded = [];
+    state.loaded.forEach((l) => {
+      if (!l.ev.multi) { loaded.push(l); return; }
+      if (loaded.some((x) => x.src === l.src)) return;
+      const cols = state.loaded.filter((x) => x.src === l.src);
+      loaded.push({ ev: { ...l.ev, wd: '', date: l.src.ev.date, days: cols.length, span: cols[0].ev.date.replace(/\/\d{4}$/, '') + '–' + cols[cols.length - 1].ev.date.replace(/\/\d{4}$/, '') },
+        roles: l.src.roles, src: l.src });
+    });
     const names = new Map();
     loaded.forEach(({ roles }, i) => roles.forEach((r) => {
       const k = r.name.toLowerCase();
@@ -1382,11 +1391,8 @@
       return t;
     }, { target: 0, assigned: 0, pending: 0, short: 0 }));
 
-    // A multi-day event is one VMS event shown as several day columns. Invite links and applications belong to the whole
-    // event, so their buttons are in its first column only. VMS keeps one daily target per role, the same on every day:
-    // it can be edited from any day column, and every column of that event shows the same pending value.
-    const firstCol = (i) => loaded.findIndex((l) => l.ev.vmsId === loaded[i].ev.vmsId) === i;
-    const daysOf = (i) => loaded.filter((l) => l.ev.vmsId === loaded[i].ev.vmsId).length;
+    const firstCol = () => true;
+    const daysOf = (i) => (loaded[i].ev.multi ? loaded[i].ev.days : 1);
     const allDays = (i) => (daysOf(i) > 1 ? ' (all ' + daysOf(i) + ' days)' : '');
     const firsts = loaded.map((l, i) => i).filter(firstCol);
     if (!firsts.includes(state.copyFrom)) state.copyFrom = firsts[0] || 0;
@@ -1404,13 +1410,8 @@
       const key = targetKey(ev, r);
       if (ok && Number(raw) !== from) edits.set(key, { ev, r, from, value: Number(raw) });
       else edits.delete(key);
-      // The other day columns of the same event show the same target.
-      input.getRootNode().querySelectorAll('input.tgt[data-tk]').forEach((el) => {
-        if (el.dataset.tk !== key) return;
-        if (el !== input) el.value = input.value;
-        el.classList.toggle('bad', !ok);
-        el.classList.toggle('dirty', edits.has(key));
-      });
+      input.classList.toggle('bad', !ok);
+      input.classList.toggle('dirty', edits.has(key));
       // Update the button in place so typing down a column keeps the cursor where it is.
       if (applyBtn) { applyBtn.textContent = 'Apply ' + nEdits() + '…'; applyBtn.disabled = !edits.size; }
     };
@@ -1431,14 +1432,15 @@
     const cellActions = (ev, r, i) => {
       const key = editKey(ev, r);
       const hidden = r.counts.hidden;
-      const span = allDays(i);
+      const span = ''; // the column header already says the event runs several days
+      const every = daysOf(i) > 1 ? 'Applies to every day of this event' : '';
       return [
         r.counts.invite ? h('button', { class: 'lnk', title: 'Copy the Express Volunteer sign-up link for this role' + span, onclick: (e) => copyInvite(ev, r, e.currentTarget) }, 'Invite link') : null,
         r.custom ? null : (state.toggleKey === key
           ? [h('button', { class: 'lnk', disabled: state.toggling, onclick: () => toggleApplications(ev, r, hidden) },
               (hidden ? 'Confirm: allow applications' : 'Confirm: stop applications') + span),
             h('button', { class: 'lnk', onclick: () => { state.toggleKey = ''; renderMain(); } }, 'Cancel')]
-          : h('button', { class: 'lnk', title: span ? 'Applies to every day of this event' : '', onclick: () => { state.toggleKey = key; renderMain(); } },
+          : h('button', { class: 'lnk', title: every, onclick: () => { state.toggleKey = key; renderMain(); } },
             (hidden ? 'Allow applications' : 'Stop applications') + span)),
       ];
     };
@@ -1457,8 +1459,8 @@
         editing && c.target != null
           ? [h('span', { class: 'num' }, c.assigned + ' / '),
             h('input', { type: 'number', min: 0, max: 200, step: 1, class: 'tgt' + (pending ? ' dirty' : ''), disabled: working,
-              'data-tk': targetKey(ev, r), value: pending ? pending.value : c.target,
-              title: 'Target for ' + r.name + (daysOf(i) > 1 ? ' (VMS uses one daily target for all ' + daysOf(i) + ' days)' : ''),
+              value: pending ? pending.value : c.target,
+              title: 'Target for ' + r.name + (daysOf(i) > 1 ? ' on each of the ' + daysOf(i) + ' days' : ''),
               oninput: (e) => onTarget(ev, r, c.target, e.target) })]
           : h('a', { class: 'num', href: roleUrl(ev, r), target: '_blank', title: 'Open this role in VMS' },
             c.target == null ? c.assigned + (c.assigned === 1 ? ' person' : ' people') : c.assigned + ' / ' + c.target),
@@ -1518,12 +1520,12 @@
       h('table', {},
         h('thead', {}, h('tr', {}, h('th', {}, 'Role'),
           loaded.map(({ ev }, i) => h('th', {}, evLabel(ev),
+            ev.span ? h('small', {}, ev.days + ' days, ' + ev.span + ' · counts for the whole event') : null,
             h('small', {}, totals[i].assigned + ' / ' + totals[i].target + ' filled · ' + totals[i].short + ' roles short'
               + (totals[i].pending ? ' · ' + totals[i].pending + ' not notified' : '')),
-            firstCol(i) ? h('div', {},
+            h('div', {},
               h('button', { class: 'lnk', title: allDays(i) ? 'One link for every day of this event' : '', onclick: (e) => copyInvite(ev, null, e.currentTarget) }, 'Event invite link'),
-              h('button', { class: 'lnk', title: 'Copy the QR code image and open VMS\'s QR code page', onclick: (e) => copyQr(ev, e.currentTarget) }, 'QR code'))
-              : h('small', {}, 'Invite links: see ' + evShort(loaded[loaded.findIndex((l) => l.ev.vmsId === ev.vmsId)].ev)))))),
+              h('button', { class: 'lnk', title: 'Copy the QR code image and open VMS\'s QR code page', onclick: (e) => copyQr(ev, e.currentTarget) }, 'QR code')))))),
         h('tbody', {}, body)));
   }
 
