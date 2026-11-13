@@ -1,5 +1,7 @@
 # VMS+
 
+> **Feedback welcome.** Feedback and feature requests are welcome: [open an issue](../../issues) or contact me directly. Don't worry about feeling nitpicky: small quality-of-life improvements are the whole point. The only thing I won't add is a feature that only applies to a single event or individual person's workflow.
+
 **A faster way to staff FIRST events in VMS.** VMS+ is a Chrome extension that adds a dashboard on top of FIRST's Volunteer Management System (`my.firstinspires.org/VMS`). It puts all your events side by side and lets you assign, check and contact volunteers in bulk.
 
 In VMS itself you staff one event and one role at a time. You open each role's page, scroll through applicants, and check ages and clearances person by person. If you run a weekend with two or more events, you do all of that again for each one. VMS+ brings the whole weekend into one screen.
