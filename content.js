@@ -372,9 +372,19 @@
   };
 
   // The first and last date of an event's schedule, read from a role's scheduling page.
+  async function loadExtraEmail(x) {
+    if (vmsExtraEmail) return;
+    try {
+      const { doc } = await fetchDoc('/VMS/Roles/RoleScheduling.aspx?ID=' + x.ev.vmsId + '&RoleID=' + x.role.id + (x.role.custom ? '&IsCustom=True' : ''));
+      const extra = doc.getElementById('MainContent_hdnUserExtraEmail');
+      if (extra && extra.value) vmsExtraEmail = extra.value.trim();
+    } catch (e) { /* leave the box empty */ }
+  }
   async function loadWindow(ev, role) {
     const { doc } = await fetchDoc('/VMS/Roles/RoleScheduling.aspx?ID=' + ev.id + '&RoleID=' + role.id + (role.custom ? '&IsCustom=True' : ''));
     const code = [...doc.querySelectorAll('script')].map((x) => x.textContent).join('\n');
+    const extra = doc.getElementById('MainContent_hdnUserExtraEmail');
+    if (extra && extra.value && !vmsExtraEmail) vmsExtraEmail = extra.value.trim();
     const a = /var startDate\s*=\s*moment\('([^']+)'\)/.exec(code), b = /var endDate\s*=\s*moment\('([^']+)'\)/.exec(code);
     const start = a && dateOf(a[1]), end = b && dateOf(b[1]);
     if (!start || !end || end < start) throw new Error('schedule dates not found');
@@ -738,7 +748,7 @@
     .evbtn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .evmenu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; display: flex; flex-direction: column; gap: 8px; min-width: 300px; max-height: 60vh; overflow: auto;
       background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; box-shadow: 0 6px 18px rgba(0,0,0,.18); }
-    button, select, input[type=search], input[type=time], input[type=text], input[type=number], textarea { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+    button, select, input[type=search], input[type=time], input[type=text], input[type=email], input[type=number], textarea { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
     button { cursor: pointer; }
     button.primary { background: var(--accent); border-color: var(--accent); color: var(--onaccent); }
     button:disabled { opacity: .5; cursor: default; }
@@ -799,6 +809,9 @@
       .prow .pflags { grid-column: 1; grid-row: 2; }
     }
     .pname { font-weight: 600; cursor: pointer; }
+    .vcnote { display: inline-block; position: relative; width: 15px; height: 11px; margin: 0 2px 0 7px; border-radius: 3px; background: var(--accent); vertical-align: -1px; cursor: help; }
+    .vcnote::after { content: ''; position: absolute; left: 3px; bottom: -4px; border-style: solid; border-width: 4px 4px 0 0; border-color: var(--accent) transparent transparent transparent; }
+    input.otheremail { width: 280px; max-width: 100%; margin-left: 4px; }
     .lnk { border: none; background: none; color: var(--accent); padding: 0; margin: 2px 12px 0 0; font-size: 12px; cursor: pointer; }
     .lnk:hover { text-decoration: underline; }
     .lnk.copying { opacity: .6; cursor: progress; }
@@ -877,6 +890,14 @@
     return el;
   }
   const chip = (tone, label, title) => h('span', { class: 'chip ' + tone, title }, label);
+  const noteText = (rows) => rows.map((r) => (r.postedDate ? r.postedDate + (r.postedBy ? ', ' + r.postedBy : '') + ': ' : '') + r.note).join('\n\n');
+  const usableNotes = (rows) => (Array.isArray(rows) ? rows.filter((r) => r && typeof r.note === 'string' && r.note.trim()) : []);
+  // A speech-bubble mark next to someone with coordinator comments; hovering shows them.
+  const noteMark = (id) => {
+    const rows = vcNotes.get(id);
+    if (!rows || !rows.length) return null;
+    return h('span', { class: 'vcnote', title: 'Coordinator comments:\n\n' + noteText(rows), role: 'img', 'aria-label': 'Has coordinator comments' });
+  };
 
   // ---------- Recommended minimum ages, from FIRST's volunteer role pages ----------
   // Source: https://www.firstinspires.org/community/volunteers/roles/<slug>, read 11/12/2026.
@@ -1134,13 +1155,17 @@
     newRole: { open: false, name: '', desc: '', target: '1', allow: true, evs: null, confirming: false, saving: false, error: '', result: null },
     msg: { evs: null, aud: '0', allRoles: true, roles: new Set(), subject: '', message: '', bcc: false, confirming: false, sending: false, error: '', result: null },
     targetEdit: false, targetEdits: new Map(), targetConfirm: false, targetApplying: false, targetResult: null, copyFrom: 0, copyTo: 1,
-    notify: { subject: saved.notify.subject || '', message: saved.notify.message || '', bcc: !!saved.notify.bcc, picks: new Map(), confirming: false, sending: false, error: '', result: null }, progress: '', error: '',
+    notify: { subject: saved.notify.subject || '', message: saved.notify.message || '', bcc: !!saved.notify.bcc, other: false, otherEmail: '', picks: new Map(), confirming: false, sending: false, error: '', result: null }, progress: '', error: '',
     note: '', drafting: false, theme: saved.theme, staffMode: saved.staffMode, showNeeded: saved.showNeeded, showOther: saved.showOther, fill: null, onlyShort: false, hideZero: saved.hideZero, hideLast: saved.hideLast, showAges: saved.showAges, hidePast: saved.hidePast, reminded: saved.reminded, sort: 'name', search: '', status: 'all', role: '', toast: '',
   };
 
   const host = document.createElement('div');
   const shadow = host.attachShadow({ mode: 'open' });
   let timesDirty = false; // Shift times tab: a time was typed and the tab hasn't been redrawn yet.
+  // Coordinator comments on each person's VMS profile (peopleID -> list), read in the background after a load. Memory only.
+  const vcNotes = new Map();
+  // The extra email address VMS fills into its own Notify form, read from a role page. Memory only.
+  let vmsExtraEmail = '';
   shadow.append(h('style', {}, CSS));
   const launch = h('button', { class: 'launch', onclick: open }, 'VMS+');
   const root = h('div', { class: 'root', hidden: true });
@@ -2074,6 +2099,7 @@
   // Work left for after the dashboard is usable, done one request at a time:
   // first the quiet roles skipped at load (almost always empty), then the training and last-season reports.
   let working = false;
+  let notesShown = true, notesSince = 0;
   async function background() {
     if (working) return;
     working = true;
@@ -2116,6 +2142,23 @@
             cur.extrasPending = false; cur.training = training; cur.lastSeason = lastSeason;
             state.loaded.forEach((l) => { if (l.src === cur) { l.training = training; l.lastSeason = lastSeason; } });
             rebuild(cur);
+          }
+          continue;
+        }
+        // Last, coordinator comments for everyone loaded, one person at a time.
+        const waiting = state.people.filter((p) => !vcNotes.has(p.id));
+        if (waiting.length) {
+          state.note = 'Checking coordinator comments (' + waiting.length + ' left)…'; renderHeader();
+          const id = waiting[0].id;
+          let rows = [];
+          try { rows = await svc('GetVCComments', { peopleID: id }); } catch (e) { if (Date.now() < blockedUntil) throw e; }
+          vcNotes.set(id, usableNotes(rows));
+          if (vcNotes.get(id).length) notesShown = false;
+          // Show new marks every so often and at the end, but not while someone is typing.
+          if (!notesShown && (waiting.length === 1 || ++notesSince >= 25)) {
+            notesSince = 0;
+            const typing = shadow.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(shadow.activeElement.tagName);
+            if (state.tab === 'staff' && !typing && !state.staffApplying) { notesShown = true; renderMain(); }
           }
           continue;
         }
@@ -2249,7 +2292,7 @@
     want('season', svc('GetVolunteerAssignments', { peopleID: id, isCurrentSeason: true }));
     want('history', svc('GetVolunteerAssignments', { peopleID: id, isCurrentSeason: false }));
     want('others', svc('GetVolunteerApplications', { peopleID: id, eventID: evId, excludeEvent: true }));
-    want('comments', svc('GetVCComments', { peopleID: id }));
+    want('comments', svc('GetVCComments', { peopleID: id }).then((rows) => { vcNotes.set(id, usableNotes(rows)); return rows; }));
     want('profile', fetchDoc(profileUrl(person)).then(({ doc }) => {
       const pick = (name) => txt(doc.getElementById('MainContent_' + name));
       // Split an element's text into lines wherever the page breaks it visually.
@@ -2499,6 +2542,7 @@
 
     const nameCell = (en) => [
       h('a', { class: 'pname', href: '#', title: 'Show details', onclick: (e) => { e.preventDefault(); openDetail(en.id); } }, showName(en)),
+      noteMark(en.id),
       en.back ? h('span', { class: 'inf', title: 'Did this role here last season' }, '↺') : null,
       en.untrained ? h('span', { class: 'bd', title: 'Required training not complete' }, '⚠') : null,
       en.age ? h('span', { class: en.age.issue === 'under' ? 'agemark bd' : 'agemark lo',
@@ -2682,7 +2726,7 @@
       const all = withRole.map((l, i) => i).filter((i) => !!opts[i]);
       return h('div', { class: 'prow' },
         h('div', {},
-          nameLink(p, staffName(p.id, p.first + ' ' + p.last)),
+          nameLink(p, staffName(p.id, p.first + ' ' + p.last)), noteMark(p.id),
           (() => {
             // With many events, count the days instead of listing them all; the full list is in the tooltip.
             const days = withRole.filter((l, i) => !!opts[i]).map((l) => evShort(l.ev));
@@ -2924,14 +2968,29 @@
         h('label', { class: 'field' }, h('input', { type: 'checkbox', checked: nt.bcc, disabled: nt.sending,
           onchange: (e) => { nt.bcc = e.target.checked; repick(); } }),
           ' BCC me on every email' + (nt.bcc ? ' (' + plural(picked.length, 'copy').replace('copys', 'copies') + ' to your inbox)' : '')),
+        h('label', { class: 'field', title: 'The same option as in VMS\'s own Notify form' },
+          h('input', { type: 'checkbox', checked: nt.other, disabled: nt.sending, onchange: (e) => {
+            nt.other = e.target.checked;
+            nt.error = '';
+            if (nt.other && !nt.otherEmail && vmsExtraEmail) nt.otherEmail = vmsExtraEmail;
+            // VMS fills this box with the extra email on your VMS profile; read it from a role page the first time.
+            if (nt.other && !nt.otherEmail && picked.length) {
+              loadExtraEmail(picked[0]).then(() => { if (nt.other && !nt.otherEmail && vmsExtraEmail) { nt.otherEmail = vmsExtraEmail; renderMain(); } });
+            }
+            repick();
+          } }),
+          ' Include this email address in the message: ',
+          h('input', { type: 'email', class: 'otheremail', value: nt.otherEmail, disabled: nt.sending, placeholder: 'name@example.org',
+            oninput: (e) => { nt.otherEmail = e.target.value; nt.error = ''; if (e.target.value.trim() && !nt.other) { nt.other = true; e.target.previousSibling.previousSibling.checked = true; } } })),
         h('div', { class: 'bar' },
           h('span', { class: 'muted grow' }, summary),
           nt.confirming
-            ? [h('strong', {}, 'Send ' + plural(picked.length, 'email') + ' now? This cannot be undone.'),
+            ? [h('strong', {}, 'Send ' + plural(picked.length, 'email') + (nt.other ? ' that include ' + nt.otherEmail.trim() : '') + ' now? This cannot be undone.'),
               h('button', { class: 'primary', disabled: nt.sending, onclick: () => sendNotifications(picked) }, nt.sending ? 'Sending…' : 'Yes, send'),
               h('button', { disabled: nt.sending, onclick: repick }, 'Cancel')]
             : h('button', { class: 'primary', disabled: !picked.length, onclick: () => {
                 if (!nt.subject.trim()) { nt.error = 'Enter a subject first.'; renderMain(); return; }
+              if (nt.other && !/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(nt.otherEmail.trim())) { nt.error = 'Enter one email address to include, or untick that box.'; renderMain(); return; }
                 nt.confirming = true; renderMain();
               } }, 'Send ' + plural(picked.length, 'email') + '…')),
         h('table', {},
@@ -2958,7 +3017,7 @@
       try {
         await svcPost('NotifyVolunteers', {
           eventID: x.ev.vmsId, idList: String(x.rowId), subject: nt.subject.trim(), ccMe: nt.bcc, ccVC: false,
-          customMessage: nt.message, emailEA: '', emailEEA: '', roleID: x.role.id,
+          customMessage: nt.message, emailEA: '', emailEEA: nt.other ? nt.otherEmail.trim() : '', roleID: x.role.id,
         });
         ok += 1;
       } catch (e) {
