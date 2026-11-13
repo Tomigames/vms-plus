@@ -1140,6 +1140,7 @@
 
   const host = document.createElement('div');
   const shadow = host.attachShadow({ mode: 'open' });
+  let timesDirty = false; // Shift times tab: a time was typed and the tab hasn't been redrawn yet.
   shadow.append(h('style', {}, CSS));
   const launch = h('button', { class: 'launch', onclick: open }, 'VMS+');
   const root = h('div', { class: 'root', hidden: true });
@@ -1311,8 +1312,12 @@
 
   function renderMain() {
     saveDrafts();
+    timesDirty = false;
     if (tabsEl && tabsEl.firstChild) tabsEl.firstChild.textContent = staffLabel();
     const top = mainEl.scrollTop;
+    // A box marked with data-fk keeps the keyboard focus across a redraw.
+    const was = shadow.activeElement;
+    const focusKey = was && mainEl.contains(was) && was.dataset ? was.dataset.fk : '';
     mainEl.replaceChildren();
     if (state.error) mainEl.append(h('div', { class: 'msg err' }, state.error, ' ',
       h('button', { class: 'lnk', onclick: (e) => copyDiagnostics(e.currentTarget) }, 'Copy diagnostics')));
@@ -1331,6 +1336,10 @@
     const views = { staff: staffView, roles: rolesView, people: peopleView, times: timesView, notify: notifyView, message: messageView };
     mainEl.append(views[state.tab]());
     mainEl.scrollTop = top;
+    if (focusKey) {
+      const again = [...mainEl.querySelectorAll('[data-fk]')].find((el) => el.dataset.fk === focusKey);
+      if (again && !again.disabled) again.focus({ preventScroll: true });
+    }
   }
 
   // ----- Roles tab -----
@@ -3041,10 +3050,28 @@
 
   // ----- Shift times tab -----
 
-  function timeInputs(target, onset) {
+  // Chrome reports a time box as changed as soon as its time is complete, while the cursor is still in it. Redrawing the
+  // tab then would throw the cursor out of the form, so the value is saved at once and the tab is redrawn after the
+  // cursor leaves the box, with focus kept on wherever it went.
+  function redrawTimesLater() {
+    setTimeout(() => {
+      if (!timesDirty) return;
+      const now = shadow.activeElement;
+      // Focus moved to a button or other control: let its click happen first, then redraw.
+      if (now && mainEl.contains(now) && !(now.dataset && now.dataset.fk)) {
+        const after = () => { now.removeEventListener('click', after); setTimeout(() => { if (timesDirty) renderMain(); }, 0); };
+        now.addEventListener('click', after);
+        now.addEventListener('blur', after, { once: true });
+        return;
+      }
+      renderMain();
+    }, 0);
+  }
+  function timeInputs(target, key) {
     const mk = (field) => h('input', {
-      type: 'time', min: MIN_TIME, max: MAX_TIME, value: target[field] || '', disabled: state.applying,
-      onchange: (e) => { target[field] = e.target.value; onset(); },
+      type: 'time', min: MIN_TIME, max: MAX_TIME, value: target[field] || '', disabled: state.applying, 'data-fk': key + ':' + field,
+      onchange: (e) => { target[field] = e.target.value; saveTimes(); state.confirming = false; state.applyResult = null; timesDirty = true; },
+      onblur: () => { if (timesDirty) redrawTimesLater(); },
     });
     return [mk('start'), ' to ', mk('end')];
   }
@@ -3075,7 +3102,7 @@
       const bad = (t) => !!t && (t.start || t.end) && !validTime(t);
       return h('section', {},
         h('h2', {}, evLabel(ev)),
-        h('div', { class: 'bar' }, h('strong', {}, 'Default shift'), timeInputs(cfg, changed),
+        h('div', { class: 'bar' }, h('strong', {}, 'Default shift'), timeInputs(cfg, ev.id + '|*'),
           bad(cfg) ? chip('bad', 'Needs a start before the end, between 6am and 10pm') : null,
           !cfg.start && !cfg.end ? h('span', { class: 'muted' }, 'Not set. Roles without their own time are left alone.') : null,
           isFirstDay && sameEvent.length ? h('button', { title: 'Copy this day’s default and role times to the other days of this event', onclick: copyToOtherDays },
@@ -3088,7 +3115,7 @@
             const eff = effectiveTime(ev.id, r.name);
             return h('tr', {},
               h('td', {}, r.name),
-              h('td', {}, timeInputs(own, changed),
+              h('td', {}, timeInputs(own, ev.id + '|' + k),
                 own.start || own.end ? [' ', h('button', { onclick: () => { own.start = ''; own.end = ''; changed(); } }, 'Clear')] : null,
                 bad(own) ? [' ', chip('bad', 'Invalid, ignored')] : null),
               h('td', { class: 'muted' }, eff ? (validTime(own) ? 'Uses ' : 'Default ') + vmsRange(eff) : 'No time set'));
