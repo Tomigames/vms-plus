@@ -21,13 +21,35 @@
   let blockedUntil = 0;
   const THROTTLED = 'VMS is limiting requests from this browser for a couple of minutes (it shows a "maintenance" page). '
     + 'Nothing is wrong with your data. Wait two minutes, then press Refresh.';
+  // What "Copy diagnostics" reports: how many requests went to each kind of VMS page, and the recent failures.
+  // Only page and service names are kept, never the query string, so no names, emails or ID numbers.
+  const diag = { since: Date.now(), requests: {}, errors: [], ms: {} };
+  const diagKey = (url, method) => {
+    const u = String(url);
+    const svcName = /VolunteerService\.asmx\/(\w+)/.exec(u);
+    if (svcName) return svcName[1];
+    const rep = /ReportID=(\d+)/i.exec(u);
+    const page = (/\/VMS\/([^?#]+)/i.exec(u) || [, u])[1];
+    return (method && method !== 'GET' ? method + ' ' : '') + page + (rep ? ' (report ' + rep[1] + ')' : '');
+  };
+  const diagError = (key, what) => {
+    diag.errors.push({ t: Date.now(), key, what });
+    if (diag.errors.length > 20) diag.errors.shift();
+  };
   async function vfetch(url, options) {
+    const key = diagKey(url, options && options.method);
     if (Date.now() < blockedUntil) throw new Error(THROTTLED);
-    const res = await fetch(url, options);
+    diag.requests[key] = (diag.requests[key] || 0) + 1;
+    const t0 = Date.now();
+    let res;
+    try { res = await fetch(url, options); } catch (e) { diagError(key, 'network error: ' + (e.message || e)); throw e; }
+    diag.ms[key] = Math.max(diag.ms[key] || 0, Date.now() - t0);
     if (/maintenance/i.test(res.url || '')) {
       blockedUntil = Date.now() + 120000;
+      diagError(key, 'VMS maintenance page (rate limit)');
       throw new Error(THROTTLED);
     }
+    if (!res.ok) diagError(key, 'HTTP ' + res.status);
     return res;
   }
 
@@ -732,6 +754,12 @@
     th, td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
     th { position: sticky; top: -12px; background: var(--panel); font-weight: 600; z-index: 1; }
     th small { display: block; font-weight: 400; color: var(--muted); }
+    /* People: the volunteer column stays in view while the event columns scroll sideways. */
+    table.ptable th:first-child, table.ptable td:first-child { position: sticky; left: -16px; z-index: 2; background: var(--panel); min-width: 200px;
+      box-shadow: 1px 0 0 var(--line); }
+    table.ptable th:first-child { z-index: 3; }
+    table.ptable td { min-width: 150px; }
+    .tabs .diagbtn { margin-left: auto; align-self: center; border: none; background: none; }
     tr.group td { background: var(--bg); font-weight: 600; }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
@@ -1186,7 +1214,9 @@
         ['times', 'Shift times'], ['notify', 'Notify (' + pendingNotifications().length + ')'], ['message', 'Message']].map(([t, label]) => h('button', {
         class: state.tab === t ? 'on' : '',
         onclick: () => { state.tab = t; state.confirming = false; state.staffConfirm = false; state.notify.confirming = false; state.msg.confirming = false; state.toggleKey = ''; state.toTop = true; render(); },
-      }, label)));
+      }, label)),
+      h('button', { class: 'lnk diagbtn', title: 'Copy version, load details and recent errors to paste into a bug report. No names or emails.',
+        onclick: (e) => copyDiagnostics(e.currentTarget) }, 'Copy diagnostics'));
     tabsEl = tabs;
     root.append(headerEl, tabs, mainEl, panelEl);
     renderPanel();
@@ -1283,7 +1313,8 @@
     if (tabsEl && tabsEl.firstChild) tabsEl.firstChild.textContent = staffLabel();
     const top = mainEl.scrollTop;
     mainEl.replaceChildren();
-    if (state.error) mainEl.append(h('div', { class: 'msg err' }, state.error));
+    if (state.error) mainEl.append(h('div', { class: 'msg err' }, state.error, ' ',
+      h('button', { class: 'lnk', onclick: (e) => copyDiagnostics(e.currentTarget) }, 'Copy diagnostics')));
     const failedReads = [];
     new Set(state.loaded.map((l) => l.src)).forEach((raw) => raw.roles.forEach((r) => {
       if (r.readFailed) failedReads.push(r.name + ' (' + evShort(raw.ev) + ')');
@@ -1589,6 +1620,49 @@
     return ok;
   }
 
+  // A plain-text report for bug reports: version, what is loaded, request counts and recent errors.
+  // It deliberately leaves out volunteer names, emails and ages.
+  function diagnosticsText() {
+    let version = 'unknown (not installed)';
+    try { version = chrome.runtime.getManifest().version; } catch (e) { /* injected copy */ }
+    const chromeV = (/Chrome\/(\d+)/.exec(navigator.userAgent) || [])[1] || '?';
+    const stamp = (t) => { const d = new Date(t); return d.toLocaleDateString() + ' ' + d.toTimeString().slice(0, 8); };
+    const lines = ['VMS+ diagnostics', 'Version ' + version + ' · Chrome ' + chromeV + ' · ' + stamp(Date.now()), ''];
+    const srcs = [...new Set(state.loaded.map((l) => l.src))];
+    lines.push('Events loaded: ' + srcs.length + (state.busy ? ' (still loading: ' + (state.progress || '') + ')' : ''));
+    srcs.forEach((raw) => {
+      const ev = raw.ev;
+      const cols = state.loaded.filter((l) => l.src === raw).length;
+      const roles = raw.roles.filter((r) => !r.admin);
+      const assigned = roles.reduce((t, r) => t + (Array.isArray(r.assigned) ? r.assigned.length : 0), 0);
+      const applicants = roles.reduce((t, r) => t + (Array.isArray(r.applicants) ? r.applicants.length : 0), 0);
+      const failed = roles.filter((r) => r.readFailed).length;
+      const quiet = roles.filter((r) => r.unchecked).length;
+      lines.push('- Event ' + ev.vmsId + ' · ' + (ev.program || '?') + ' · ' + (ev.date || '?') + ' · ' + plural(ev.days || 1, 'day')
+        + (cols > 1 ? ' shown as ' + cols + ' columns' : '') + ' · ' + plural(roles.length, 'role') + ' · '
+        + assigned + ' assignments · ' + applicants + ' applications'
+        + (failed ? ' · ' + failed + ' applicant lists failed' : '') + (quiet ? ' · ' + quiet + ' roles still checking' : '')
+        + (raw.extrasPending ? ' · training/last season still loading' : ''));
+    });
+    const sel = state.events.filter((e) => state.selected.has(e.id));
+    if (sel.length !== srcs.length) lines.push('Ticked but not loaded: ' + sel.filter((e) => !srcs.some((r) => r.ev.vmsId === e.vmsId)).map((e) => e.vmsId).join(', '));
+    lines.push('');
+    const total = Object.values(diag.requests).reduce((a, b) => a + b, 0);
+    lines.push('Requests to VMS since ' + stamp(diag.since) + ': ' + total);
+    Object.entries(diag.requests).sort((a, b) => b[1] - a[1]).forEach(([k, n]) => lines.push('- ' + k + ': ' + n + ' (slowest ' + ((diag.ms[k] || 0) / 1000).toFixed(1) + 's)'));
+    lines.push('Rate-limit pause: ' + (Date.now() < blockedUntil ? 'active, ' + Math.ceil((blockedUntil - Date.now()) / 1000) + 's left' : 'none'));
+    lines.push('');
+    lines.push('Recent errors: ' + (diag.errors.length ? '' : 'none'));
+    diag.errors.forEach((x) => lines.push('- ' + stamp(x.t) + ' · ' + x.key + ' · ' + x.what));
+    if (state.error) lines.push('Message shown: ' + state.error);
+    lines.push('');
+    lines.push('Tab: ' + state.tab + ' · theme ' + state.theme + ' · hide no-target roles ' + (state.hideZero ? 'on' : 'off')
+      + ' · minimum ages ' + (state.showAges ? 'on' : 'off') + ' · hide past ' + (state.hidePast ? 'on' : 'off') + ' · staffing view ' + state.staffMode);
+    lines.push('Screen ' + window.innerWidth + '×' + window.innerHeight);
+    return lines.join('\n');
+  }
+  const copyDiagnostics = (btn) => flashCopy(btn, () => navigator.clipboard.writeText(diagnosticsText()));
+
   async function copyInvite(ev, r, btn) {
     const label = (r ? r.name + ' on ' : 'Whole event, ') + evShort(ev);
     let url = '', err = '';
@@ -1766,7 +1840,7 @@
               onclick: () => { shown.forEach((p) => REMIND_KINDS.forEach((k) => { if (state.reminded[k]) delete state.reminded[k][p.id]; })); renderMain(); } },
               'Clear drafted marks (' + done + ')') : null);
         })()) : null,
-      h('table', {},
+      h('table', { class: 'ptable' },
         h('thead', {}, h('tr', {}, h('th', {}, 'Volunteer'), loaded.map(({ ev }) => h('th', {}, evLabel(ev))), h('th', {}, 'Flags'), remind ? h('th', {}, 'Reminder') : null)),
         h('tbody', {}, shown.map((p) => h('tr', {},
           h('td', {},
