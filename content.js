@@ -392,20 +392,29 @@
   }
 
   // Turn one loaded event into its columns: itself for a one-day event, one per day otherwise.
+  // VMS schedules start before the event itself (usually the day before): those are setup days, shown as their own
+  // columns while "Show setup days" is on.
   function splitDays(raw) {
     raw.src = raw;
     const ev = raw.ev, first = dateOf(ev.date), w = raw.sched;
     const all = splitAll().has(ev.id);
-    if (!w || !first || (ev.days <= 1 && !all)) return [raw];
+    if (!w || !first) return [raw];
     const last = dayGap(w.start, w.end);
+    const lead = Math.max(0, Math.min(dayGap(w.start, first), last + 1)); // positions before the first event day
     const days = [];
     if (all) for (let pos = 0; pos <= last; pos++) days.push(pos);
-    else for (let i = 0; i < ev.days; i++) { const pos = dayGap(w.start, first) + i; if (pos >= 0 && pos <= last) days.push(pos); }
+    else {
+      if (state.showSetup) for (let pos = 0; pos < lead; pos++) days.push(pos);
+      for (let i = 0; i < Math.max(1, ev.days); i++) { const pos = lead + i; if (pos <= last) days.push(pos); }
+    }
     if (days.length < 2) return [raw];
+    // A one-day event keeps its own id for the event day, so drafts and shift times saved for it still match.
+    const single = ev.days <= 1 && !all;
     return days.map((pos) => {
       const date = new Date(w.start.getFullYear(), w.start.getMonth(), w.start.getDate() + pos);
+      const setup = pos < lead;
       return {
-        ev: { ...ev, id: ev.id + '@' + pos, vmsId: ev.id, days: 1, pos, multi: true, wd: WEEKDAYS[date.getDay()],
+        ev: { ...ev, id: single && !setup ? ev.id : ev.id + '@' + pos, vmsId: ev.id, days: 1, pos, multi: true, setup, wd: WEEKDAYS[date.getDay()],
           date: (date.getMonth() + 1) + '/' + date.getDate() + '/' + date.getFullYear() },
         roles: raw.roles.map((r) => {
           const everyone = Array.isArray(r.assigned) ? r.assigned : [];
@@ -422,7 +431,7 @@
           const told = rows.filter((v) => v.Assignments.some((a) => a.IsNotified)).length;
           // Applicants say which days they can come ("Fr Sa Su"); they are only offered on those days.
           const code = DAY_CODES[date.getDay()];
-          const canCome = (v) => !availableDays(v) || availableDays(v).includes(code);
+          const canCome = (v) => setup || !availableDays(v) || availableDays(v).includes(code);
           const applying = (Array.isArray(r.applicants) ? r.applicants : []).filter(canCome);
           return { ...r, assigned: rows,
             // Someone in the role on another day is only offered here if this is one of their available days too.
@@ -600,9 +609,9 @@
       });
     });
     if (!prev) {
-      // Only events shown as several day columns need their schedule dates.
+      // The schedule dates give the day columns: the event's days and the setup days before it.
       const anchor = roles.find((r) => !r.admin) || roles[0];
-      if (anchor && (ev.days > 1 || splitAll().has(ev.id))) {
+      if (anchor) {
         jobs.push(async () => { try { sched = await loadWindow(ev, anchor); } catch (e) { sched = null; } });
       }
     }
@@ -846,7 +855,7 @@
     .sp { flex: 1; }
     .inf { color: var(--info); } .bd { color: var(--bad); }
     .rname { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-    .agechip { flex: none; width: 54px; overflow: hidden; box-sizing: border-box; margin: 0; padding: 0 4px; text-align: center; font-size: 11px; font-weight: 600; }
+    .agechip { flex: none; overflow: hidden; box-sizing: border-box; margin: 0; padding: 0 4px; text-align: center; font-size: 11px; font-weight: 600; }
     .agechip.none { visibility: hidden; }
     .agemark { display: inline-block; font-size: 11px; font-weight: 600; border: 1px solid currentColor; border-radius: 8px; padding: 0 5px; margin-left: 4px; line-height: 15px; }
     .seg { padding: 3px 9px; font-size: 12px; border-radius: 0; }
@@ -1095,7 +1104,7 @@
       notify: d.notify || {},
       selected: Array.isArray(d.selected) ? d.selected : null,
       tab: d.tab, staffRole: d.staffRole, showAssigned: !!d.showAssigned, hideZero: !!d.hideZero, hideLast: !!d.hideLast, staffMode: d.staffMode === 'slot' ? 'slot' : 'person', theme: ['light', 'dark'].includes(d.theme) ? d.theme : 'auto',
-      showNeeded: !!d.showNeeded, showOther: !!d.showOther, showAges: d.showAges !== false, hidePast: d.hidePast !== false,
+      showNeeded: !!d.showNeeded, showOther: !!d.showOther, showAges: d.showAges !== false, hidePast: d.hidePast !== false, showSetup: d.showSetup !== false,
       reminded: d.reminded && typeof d.reminded === 'object' ? d.reminded : {},
     };
   })();
@@ -1104,7 +1113,7 @@
       staged: [...state.staged, ...state.parked].map((x) => ({ evId: x.evId, role: x.role, peopleId: x.peopleId, ...(x.remove ? { remove: true } : {}) })),
       notify: { subject: state.notify.subject, message: state.notify.message, bcc: state.notify.bcc },
       selected: state.events.length ? [...state.selected] : saved.selected,
-      tab: state.tab, staffRole: state.staffRole, showAssigned: state.showAssigned, hideZero: state.hideZero, hideLast: state.hideLast, staffMode: state.staffMode, theme: state.theme, showNeeded: state.showNeeded, showOther: state.showOther, showAges: state.showAges, hidePast: state.hidePast,
+      tab: state.tab, staffRole: state.staffRole, showAssigned: state.showAssigned, hideZero: state.hideZero, hideLast: state.hideLast, staffMode: state.staffMode, theme: state.theme, showNeeded: state.showNeeded, showOther: state.showOther, showAges: state.showAges, hidePast: state.hidePast, showSetup: state.showSetup,
       reminded: state.reminded,
     };
     try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(data)); } catch (e) { /* progress just won't persist */ }
@@ -1156,7 +1165,7 @@
     msg: { evs: null, aud: '0', allRoles: true, roles: new Set(), subject: '', message: '', bcc: false, confirming: false, sending: false, error: '', result: null },
     targetEdit: false, targetEdits: new Map(), targetConfirm: false, targetApplying: false, targetResult: null, copyFrom: 0, copyTo: 1,
     notify: { subject: saved.notify.subject || '', message: saved.notify.message || '', bcc: !!saved.notify.bcc, other: false, otherEmail: '', picks: new Map(), confirming: false, sending: false, error: '', result: null }, progress: '', error: '',
-    note: '', drafting: false, theme: saved.theme, staffMode: saved.staffMode, showNeeded: saved.showNeeded, showOther: saved.showOther, fill: null, onlyShort: false, hideZero: saved.hideZero, hideLast: saved.hideLast, showAges: saved.showAges, hidePast: saved.hidePast, reminded: saved.reminded, sort: 'name', search: '', status: 'all', role: '', toast: '',
+    note: '', drafting: false, theme: saved.theme, staffMode: saved.staffMode, showNeeded: saved.showNeeded, showOther: saved.showOther, fill: null, onlyShort: false, hideZero: saved.hideZero, hideLast: saved.hideLast, showAges: saved.showAges, hidePast: saved.hidePast, showSetup: saved.showSetup, reminded: saved.reminded, sort: 'name', search: '', status: 'all', role: '', toast: '',
   };
 
   const host = document.createElement('div');
@@ -1221,7 +1230,7 @@
     background();
   }
 
-  const evLabel = (ev) => (ev.date ? (ev.wd ? ev.wd + ' ' : '') + ev.date.replace(/\/\d{4}$/, '') + ' · ' : '') + ev.name;
+  const evLabel = (ev) => (ev.date ? (ev.setup ? 'Setup ' : '') + (ev.wd ? ev.wd + ' ' : '') + ev.date.replace(/\/\d{4}$/, '') + ' · ' : '') + ev.name;
   const roleUrl = (ev, r) => '/VMS/Roles/RoleScheduling.aspx?ID=' + ev.vmsId + '&RoleID=' + r.id + (r.custom ? '&IsCustom=True' : '');
 
   let headerEl, mainEl, tabsEl;
@@ -1297,7 +1306,10 @@
       title: state.hidePast ? 'Show events whose last day is over' : 'Hide events whose last day is over',
       onclick: () => { state.hidePast = !state.hidePast; saveDrafts(); eventsCompact = false; renderHeader(); },
     }, state.hidePast ? 'Show past (' + pastCount + ')' : 'Hide past') : null;
-    if (!eventsCompact) return h('div', { class: 'events' }, boxes, clearAll, pastToggle);
+    const setupToggle = h('button', { class: 'lnk evclear', disabled: state.busy || state.staffApplying,
+      title: 'Setup days are the days on an event\'s VMS schedule before the event itself (usually the day before)',
+      onclick: () => setShowSetup(!state.showSetup) }, state.showSetup ? 'Hide setup days' : 'Show setup days');
+    if (!eventsCompact) return h('div', { class: 'events' }, boxes, clearAll, pastToggle, setupToggle);
     const chosen = list.filter((ev) => state.selected.has(ev.id));
     const label = !chosen.length ? 'Choose events'
       : chosen.length === 1 ? evLabel(chosen[0])
@@ -1322,7 +1334,7 @@
             });
             e.target.parentElement.querySelector('.evnone').hidden = shown > 0;
           } }),
-        h('div', { class: 'evtools' }, clearAll, pastToggle),
+        h('div', { class: 'evtools' }, clearAll, pastToggle, setupToggle),
         boxes,
         h('div', { class: 'sub evnone', hidden: list.some((ev) => evMatches(ev, q)) }, list.length ? 'No events match.' : 'No upcoming events.')) : null);
   }
@@ -1334,6 +1346,18 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => { eventsCompact = false; eventsOpen = false; renderHeader(); }, 200);
   });
+
+  // Show or hide setup-day columns for the events already loaded; nothing needs reading again.
+  function setShowSetup(on) {
+    state.showSetup = on;
+    const raws = [...new Set(state.loaded.map((l) => l.src))];
+    state.loaded = raws.flatMap((raw) => splitDays(raw));
+    state.people = buildPeople(state.loaded);
+    state.fill = null; state.staffConfirm = false;
+    restoreDrafts();
+    saveDrafts();
+    render();
+  }
 
   function renderMain() {
     saveDrafts();
@@ -1377,7 +1401,11 @@
       if (!l.ev.multi) { loaded.push(l); return; }
       if (loaded.some((x) => x.src === l.src)) return;
       const cols = state.loaded.filter((x) => x.src === l.src);
-      loaded.push({ ev: { ...l.ev, wd: '', date: l.src.ev.date, days: cols.length, span: cols[0].ev.date.replace(/\/\d{4}$/, '') + '–' + cols[cols.length - 1].ev.date.replace(/\/\d{4}$/, '') },
+      const evCols = cols.filter((x) => !x.ev.setup), setupCols = cols.filter((x) => x.ev.setup);
+      const md = (x) => x.ev.date.replace(/\/\d{4}$/, '');
+      const span = [evCols.length > 1 ? evCols.length + ' days, ' + md(evCols[0]) + '–' + md(evCols[evCols.length - 1]) : '',
+        setupCols.length ? 'setup ' + setupCols.map(md).join(', ') : ''].filter(Boolean).join(' + ');
+      loaded.push({ ev: { ...l.ev, wd: '', setup: false, date: l.src.ev.date, days: Math.max(1, evCols.length), span },
         roles: l.src.roles, src: l.src });
     });
     const names = new Map();
@@ -1545,7 +1573,7 @@
       h('table', {},
         h('thead', {}, h('tr', {}, h('th', {}, 'Role'),
           loaded.map(({ ev }, i) => h('th', {}, evLabel(ev),
-            ev.span ? h('small', {}, ev.days + ' days, ' + ev.span + ' · counts for the whole event') : null,
+            ev.span ? h('small', {}, ev.span + ' · counts for the whole event') : null,
             h('small', {}, totals[i].assigned + ' / ' + totals[i].target + ' filled · ' + totals[i].short + ' roles short'
               + (totals[i].pending ? ' · ' + totals[i].pending + ' not notified' : '')),
             h('div', {},
@@ -1703,7 +1731,7 @@
     if (state.error) lines.push('Message shown: ' + state.error);
     lines.push('');
     lines.push('Tab: ' + state.tab + ' · theme ' + state.theme + ' · hide no-target roles ' + (state.hideZero ? 'on' : 'off')
-      + ' · minimum ages ' + (state.showAges ? 'on' : 'off') + ' · hide past ' + (state.hidePast ? 'on' : 'off') + ' · staffing view ' + state.staffMode);
+      + ' · minimum ages ' + (state.showAges ? 'on' : 'off') + ' · hide past ' + (state.hidePast ? 'on' : 'off') + ' · setup days ' + (state.showSetup ? 'on' : 'off') + ' · staffing view ' + state.staffMode);
     lines.push('Screen ' + window.innerWidth + '×' + window.innerHeight);
     return lines.join('\n');
   }
@@ -2047,7 +2075,7 @@
 
   // ----- Shared helpers for the tabs that write -----
 
-  const evShort = (ev) => (ev.date ? (ev.wd ? ev.wd + ' ' : '') + ev.date.replace(/\/\d{4}$/, '') : ev.name);
+  const evShort = (ev) => (ev.date ? (ev.setup ? 'Setup ' : '') + (ev.wd ? ev.wd + ' ' : '') + ev.date.replace(/\/\d{4}$/, '') : ev.name);
   // The VMS event behind a column id.
   const vmsEventOf = (key) => { const l = state.loaded.find((x) => String(x.ev.id) === String(key)); return l ? l.ev.vmsId : Number(key); };
   const fullName = (v) => ((v.PreferredName || v.FirstName || '') + ' ' + (v.LastName || '')).trim();
@@ -2444,7 +2472,7 @@
       const r = roleIn(l, name);
       if (!r) return null;
       const leaving = state.staged.filter((x) => x.remove && x.evId === l.ev.id && x.role === name).length;
-      return { r, have: r.assigned.length - leaving + stagedFor(l.ev.id, name).length, target: r.counts ? r.counts.target : null };
+      return { r, have: r.assigned.length - leaving + stagedFor(l.ev.id, name).length, target: r.counts && !l.ev.setup ? r.counts.target : null }; // the target is for event days, not setup days
     };
 
     // A small badge with the role's minimum age. Its colour shows the age band; it turns red when
@@ -2465,6 +2493,11 @@
         + (young.length ? '. Under the minimum: ' + [...new Set(young)].join(', ') : '');
       return h('span', { class: 'chip ' + tone + ' agechip', title: tip }, (young.length ? '! ' : '') + mins.join('/') + '+');
     };
+    // Every badge is as wide as the longest one in the list, so the role names still line up.
+    const badges = new Map(names.map((n) => [n.name, state.showAges ? ageBadge(n.name) : null]));
+    const badgeLen = Math.max(0, ...[...badges.values()].filter(Boolean).map((b) => b.textContent.length));
+    const badgeWidth = 'width:' + (badgeLen + 2) + 'ch';
+    badges.forEach((b) => { if (b) b.style.cssText = badgeWidth; });
     const roleList = h('div', { class: 'card rolelist' },
       h('label', { class: 'rrow', style: 'justify-content:flex-start' }, h('input', {
         type: 'checkbox', checked: state.hideZero,
@@ -2478,10 +2511,10 @@
       names.map((n) => h('div', {
         class: 'rrow' + (n.name === cur ? ' on' : ''),
         onclick: () => { state.staffRole = n.name; state.staffConfirm = false; renderMain(); },
-      }, h('span', { class: 'rname' }, state.showAges ? ageBadge(n.name) || h('span', { class: 'agechip none' }) : null, h('span', {}, n.name)),
+      }, h('span', { class: 'rname' }, state.showAges ? badges.get(n.name) || h('span', { class: 'agechip none', style: badgeWidth }) : null, h('span', {}, n.name)),
       h('span', { class: 'cnt' }, loaded.map((l, i) => {
         const f = fill(l, n.name);
-        const text = f ? f.have + '/' + (f.target == null ? '?' : f.target) : '—';
+        const text = !f ? '—' : f.target == null && l.ev.setup ? String(f.have) : f.have + '/' + (f.target == null ? '?' : f.target);
         // Each count keeps its separator, so a long row only breaks between events.
         return [i ? ' ' : '', h('span', {}, h('span', { class: f && f.target > 0 ? (f.have < f.target ? 'lo' : 'hi') : '' }, text), i < loaded.length - 1 ? ' ·' : '')];
       })))));
@@ -2580,7 +2613,7 @@
       if (!col.f) return [evShort(col.l.ev), h('small', {}, 'Not at this event')];
       const f = col.f;
       return [evShort(col.l.ev) + ' · ',
-        h('span', { class: f.target > 0 ? (f.have < f.target ? 'lo' : 'hi') : '' }, f.have + ' of ' + (f.target == null ? '?' : f.target)),
+        h('span', { class: f.target > 0 ? (f.have < f.target ? 'lo' : 'hi') : '' }, f.target == null && col.l.ev.setup ? String(f.have) : f.have + ' of ' + (f.target == null ? '?' : f.target)),
         h('small', {}, col.set ? ['Shift ' + col.common, col.differ ? h('span', { class: 'lo' }, ' · ' + col.differ + (col.differ === 1 ? ' differs' : ' differ')) : null]
           : col.common === ALL_DAY ? chip('warn', '6am–10pm', 'Still the all-day default')
             : col.common ? 'Most have ' + col.common : 'no shift time set')];
@@ -2723,15 +2756,17 @@
     const curCustom = withRole.some((l) => roleIn(l, cur).custom);
     const poolRows = shownPool.map(({ p, opts, kind, why, when }) => {
       const can = (i) => !!opts[i] && p.cleared && !isStaged(p, withRole[i]) && !busy;
-      const all = withRole.map((l, i) => i).filter((i) => !!opts[i]);
+      // "All" means the event days; a setup day is only ever assigned on its own.
+      const all = withRole.map((l, i) => i).filter((i) => !!opts[i] && !withRole[i].ev.setup);
+      const nDays = withRole.filter((l) => !l.ev.setup).length;
       return h('div', { class: 'prow' },
         h('div', {},
           nameLink(p, staffName(p.id, p.first + ' ' + p.last)), noteMark(p.id),
           (() => {
             // With many events, count the days instead of listing them all; the full list is in the tooltip.
-            const days = withRole.filter((l, i) => !!opts[i]).map((l) => evShort(l.ev));
-            const list = days.length > 2 && days.length === withRole.length ? 'every day'
-              : days.length > 3 ? days.length + ' of ' + withRole.length + ' days'
+            const days = withRole.filter((l, i) => !!opts[i] && !l.ev.setup).map((l) => evShort(l.ev));
+            const list = days.length > 2 && days.length === nDays ? 'every day'
+              : days.length > 3 ? days.length + ' of ' + nDays + ' days'
                 : days.length > 2 ? days.slice(0, -1).join(', ') + ' and ' + days[days.length - 1] : days.join(' and ');
             return h('div', { class: 'sub', title: days.length > 2 ? days.join(', ') : '' }, why + ' · signed up for ' + list + (when ? ' · applied ' + fmtDay(when) : ''));
           })()),
@@ -2758,7 +2793,8 @@
             fillIdx >= 0
               ? h('button', { class: 'primary', disabled: !can(fillIdx), onclick: () => stage(p, [withRole[fillIdx]]) }, 'Assign ' + evShort(withRole[fillIdx].ev))
               : withRole.map((l, i) => h('button', { disabled: !can(i), onclick: () => stage(p, [l]) }, evShort(l.ev))),
-            withRole.length > 1 ? h('button', { disabled: all.length < 2 || !all.every(can), onclick: () => stage(p, all.map((i) => withRole[i])) }, all.length > 2 ? 'All' : 'Both') : null,
+            nDays > 1 ? h('button', { disabled: all.length < 2 || !all.every(can), title: withRole.some((l) => l.ev.setup) ? 'Every event day, not setup days' : '',
+              onclick: () => stage(p, all.map((i) => withRole[i])) }, all.length > 2 ? 'All' : 'Both') : null,
           ],
           // Hiding is for people who are not placed anywhere: it takes them out of the applicant lists.
           opts.some((o) => o && o.elsewhere.length) || state.staged.some((x) => x.peopleId === p.id) ? null : h('div', {},
@@ -3160,8 +3196,8 @@
       const usable = roles.filter((r) => !r.admin && !r.inactive).sort((a, b) => a.name.localeCompare(b.name));
       const setCount = usable.filter((r) => validTime(cfg.roles[r.name.toLowerCase()])).length;
       // On a multi-day event, the first day's times can be copied to every other day in one click.
-      const sameEvent = state.loaded.filter((l) => l.ev.vmsId === ev.vmsId && l.ev.id !== ev.id);
-      const isFirstDay = ev.multi && state.loaded.find((l) => l.ev.vmsId === ev.vmsId).ev.id === ev.id;
+      const sameEvent = state.loaded.filter((l) => l.ev.vmsId === ev.vmsId && l.ev.id !== ev.id && !l.ev.setup);
+      const isFirstDay = ev.multi && !ev.setup && state.loaded.find((l) => l.ev.vmsId === ev.vmsId && !l.ev.setup).ev.id === ev.id;
       const copyToOtherDays = () => {
         sameEvent.forEach((l) => {
           const to = cfgFor(l.ev.id);
