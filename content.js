@@ -765,6 +765,7 @@
     .tabs button { border-radius: 6px 6px 0 0; border-bottom: none; }
     .tabs button.on { background: var(--accent); border-color: var(--accent); color: var(--onaccent); }
     main { flex: 1; overflow: auto; padding: 12px 16px 24px; }
+    .stickybar { position: sticky; bottom: -24px; z-index: 4; border-radius: 8px 8px 0 0; box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.12); } /* -24px: flush with the bottom edge, past main's bottom padding */
     .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
     .bar .grow { flex: 1; }
     .muted { color: var(--muted); }
@@ -2829,7 +2830,8 @@
     const adds = state.staged.filter((x) => !x.remove).length;
     const told = state.staged.filter((x) => x.remove && x.notified).length;
     const summary = [adds ? plural(adds, 'assignment') : '', n - adds ? plural(n - adds, 'removal') : ''].filter(Boolean).join(' and ');
-    const footer = h('div', { class: 'card bar', style: 'margin-bottom:0' },
+    // With changes staged, the bar stays at the bottom of the screen while the lists above it are longer than the page.
+    const footer = h('div', { class: 'card bar' + (n ? ' stickybar' : ''), style: 'margin-bottom:0' },
       h('span', { class: 'muted grow' }, n ? 'Staged: ' + summary + ', kept in this browser until you apply or discard' : 'Nothing staged'),
       state.staffConfirm
         ? [h('strong', {}, 'Apply ' + summary + ' to VMS? No email is sent.'
