@@ -735,7 +735,14 @@
     .rrow { display: flex; justify-content: space-between; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
     .rrow:hover { background: var(--bg); }
     .rrow.on { background: var(--infobg); color: var(--info); font-weight: 600; }
-    .rrow .cnt { white-space: nowrap; font-variant-numeric: tabular-nums; }
+    /* With many events the counts don't fit beside the name: they move to their own line and wrap between events. */
+    .rrow { flex-wrap: wrap; row-gap: 2px; }
+    .rrow .rname { flex: 1 1 130px; }
+    .rrow .cnt { margin-left: auto; max-width: 100%; text-align: right; font-variant-numeric: tabular-nums; }
+    .rrow .cnt > span { white-space: nowrap; }
+    .hscroll { overflow-x: auto; }
+    /* Day buttons wrap onto more lines instead of pushing the flags out of view. */
+    .pacts { text-align: right; max-width: 380px; }
     .lo { color: var(--warn); } .hi { color: var(--ok); }
     .days { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
     .chip.plain { background: var(--bg); color: var(--ink); border: 1px solid var(--line); }
@@ -2309,7 +2316,8 @@
       h('span', { class: 'cnt' }, loaded.map((l, i) => {
         const f = fill(l, n.name);
         const text = f ? f.have + '/' + (f.target == null ? '?' : f.target) : '—';
-        return [i ? ' · ' : '', h('span', { class: f && f.target > 0 ? (f.have < f.target ? 'lo' : 'hi') : '' }, text)];
+        // Each count keeps its separator, so a long row only breaks between events.
+        return [i ? ' ' : '', h('span', {}, h('span', { class: f && f.target > 0 ? (f.have < f.target ? 'lo' : 'hi') : '' }, text), i < loaded.length - 1 ? ' ·' : '')];
       })))));
 
     const withRole = loaded.filter((l) => roleIn(l, cur));
@@ -2414,7 +2422,8 @@
       ? h('div', { class: 'slot pick' }, 'Filling', h('span', { class: 'sp' }), h('button', { class: 'xbtn', title: 'Stop filling', onclick: stopFill }, '×'))
       : h('button', { class: 'slot open', disabled: busy, title: 'Show the people who can fill ' + evShort(col.l.ev), onclick: () => startFill(col.l) }, label));
 
-    const personTable = () => h('table', { class: 'rt' },
+    // Each day column keeps its width; with many events the table scrolls sideways instead of squeezing out the names.
+    const personTable = () => h('div', { class: 'hscroll' }, h('table', { class: 'rt', style: 'min-width:' + (220 + cols.length * 170) + 'px' },
       h('thead', {}, h('tr', {},
         h('th', {}, plural(list.length, 'person').replace('persons', 'people')),
         cols.map((col) => h('th', { class: 'd', title: headTip(col) }, dayHead(col))))),
@@ -2430,7 +2439,7 @@
           h('td', { class: 'muted', style: 'text-align:right' }, 'Open slots'),
           cols.map((col) => h('td', { class: 'd' }, !col.f ? null
             : col.open > 0 ? openChip(col, col.open + ' open')
-              : h('span', { class: 'muted' }, col.f.target == null ? '' : col.f.have > col.f.target ? (col.f.have - col.f.target) + ' over' : 'Full'))))));
+              : h('span', { class: 'muted' }, col.f.target == null ? '' : col.f.have > col.f.target ? (col.f.have - col.f.target) + ' over' : 'Full')))))));
 
     // One row per slot. Someone on every day gets one chip across all of them; the rest sit in their own day's column.
     const slotGrid = () => {
@@ -2455,7 +2464,7 @@
           else kids.push(h('div', {}));
         });
       }
-      return h('div', { class: 'slots', style: 'grid-template-columns: 26px repeat(' + cols.length + ', minmax(0, 1fr))' }, kids);
+      return h('div', { class: 'hscroll' }, h('div', { class: 'slots', style: 'grid-template-columns: 26px repeat(' + cols.length + ', minmax(160px, 1fr))' }, kids));
     };
 
     const setMode = (m) => { state.staffMode = m; renderMain(); };
@@ -2551,8 +2560,12 @@
       return h('div', { class: 'prow' },
         h('div', {},
           nameLink(p, staffName(p.id, p.first + ' ' + p.last)),
-          h('div', { class: 'sub' }, why + ' · signed up for ' + withRole.filter((l, i) => !!opts[i]).map((l) => evShort(l.ev)).join(' and ')
-            + (when ? ' on ' + fmtDay(when) : ''))),
+          (() => {
+            // With many events, count the days instead of listing them all; the full list is in the tooltip.
+            const days = withRole.filter((l, i) => !!opts[i]).map((l) => evShort(l.ev));
+            const list = days.length > 3 ? days.length + ' of ' + withRole.length + ' days' : days.join(' and ');
+            return h('div', { class: 'sub', title: days.length > 3 ? days.join(', ') : '' }, why + ' · signed up for ' + list + (when ? ' on ' + fmtDay(when) : ''));
+          })()),
         h('div', { class: 'pflags' },
           (() => {
             const rule = strictestRule(cur, withRole.filter((l, i) => !!opts[i]));
@@ -2571,7 +2584,7 @@
           })(),
           opts.map((o, i) => (o && o.moving.length ? chip('info', evShort(withRole[i].ev) + ': moving from ' + o.moving.join(', ')) : null)),
           opts.map((o, i) => (o && o.elsewhere.length ? chip('warn', evShort(withRole[i].ev) + ': already ' + o.elsewhere.join(', ')) : null))),
-        h('div', { style: 'text-align:right' },
+        h('div', { class: 'pacts' },
           !p.cleared ? h('span', { class: 'sub' }, 'Cannot be assigned yet') : [
             fillIdx >= 0
               ? h('button', { class: 'primary', disabled: !can(fillIdx), onclick: () => stage(p, [withRole[fillIdx]]) }, 'Assign ' + evShort(withRole[fillIdx].ev))
