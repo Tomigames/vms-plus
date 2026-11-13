@@ -1373,8 +1373,9 @@
       return t;
     }, { target: 0, assigned: 0, pending: 0, short: 0 }));
 
-    // A multi-day event is one VMS event shown as several day columns. Targets, invite links and applications belong
-    // to the whole event, so they are shown and edited in its first column only.
+    // A multi-day event is one VMS event shown as several day columns. Invite links and applications belong to the whole
+    // event, so their buttons are in its first column only. VMS keeps one daily target per role, the same on every day:
+    // it can be edited from any day column, and every column of that event shows the same pending value.
     const firstCol = (i) => loaded.findIndex((l) => l.ev.vmsId === loaded[i].ev.vmsId) === i;
     const daysOf = (i) => loaded.filter((l) => l.ev.vmsId === loaded[i].ev.vmsId).length;
     const allDays = (i) => (daysOf(i) > 1 ? ' (all ' + daysOf(i) + ' days)' : '');
@@ -1385,15 +1386,22 @@
     const working = state.targetApplying;
     const edits = state.targetEdits;
     const editKey = (ev, r) => ev.id + ':' + r.id + ':' + (r.custom ? 1 : 0);
+    const targetKey = (ev, r) => (ev.vmsId || ev.id) + ':' + r.id + ':' + (r.custom ? 1 : 0);
     const nEdits = () => plural(edits.size, 'target change');
     let applyBtn = null;
     const onTarget = (ev, r, from, input) => {
       const raw = input.value.trim();
       const ok = /^\d{1,3}$/.test(raw) && Number(raw) <= 200;
-      if (ok && Number(raw) !== from) edits.set(editKey(ev, r), { ev, r, from, value: Number(raw) });
-      else edits.delete(editKey(ev, r));
-      input.classList.toggle('bad', !ok);
-      input.classList.toggle('dirty', edits.has(editKey(ev, r)));
+      const key = targetKey(ev, r);
+      if (ok && Number(raw) !== from) edits.set(key, { ev, r, from, value: Number(raw) });
+      else edits.delete(key);
+      // The other day columns of the same event show the same target.
+      input.getRootNode().querySelectorAll('input.tgt[data-tk]').forEach((el) => {
+        if (el.dataset.tk !== key) return;
+        if (el !== input) el.value = input.value;
+        el.classList.toggle('bad', !ok);
+        el.classList.toggle('dirty', edits.has(key));
+      });
       // Update the button in place so typing down a column keeps the cursor where it is.
       if (applyBtn) { applyBtn.textContent = 'Apply ' + nEdits() + '…'; applyBtn.disabled = !edits.size; }
     };
@@ -1403,10 +1411,10 @@
       names.forEach((row) => {
         const src = row.per[a], dst = row.per[b];
         if (!src || !dst || !src.counts || !dst.counts || src.admin || dst.admin) return;
-        const pending = edits.get(editKey(loaded[a].ev, src));
+        const pending = edits.get(targetKey(loaded[a].ev, src));
         const want = pending ? pending.value : src.counts.target;
-        if (want !== dst.counts.target) edits.set(editKey(loaded[b].ev, dst), { ev: loaded[b].ev, r: dst, from: dst.counts.target, value: want });
-        else edits.delete(editKey(loaded[b].ev, dst));
+        if (want !== dst.counts.target) edits.set(targetKey(loaded[b].ev, dst), { ev: loaded[b].ev, r: dst, from: dst.counts.target, value: want });
+        else edits.delete(targetKey(loaded[b].ev, dst));
       });
       state.targetConfirm = false; renderMain();
     };
@@ -1435,12 +1443,13 @@
       if (c.applicants) bits.push(c.applicants + ' applicant' + (c.applicants === 1 ? '' : 's'));
       if (r.counts && r.counts.hidden) bits.push('hidden');
       if (r.inactive) bits.push('inactive');
-      const pending = edits.get(editKey(ev, r));
+      const pending = edits.get(targetKey(ev, r));
       return h('td', { class: cls },
-        editing && c.target != null && firstCol(i)
+        editing && c.target != null
           ? [h('span', { class: 'num' }, c.assigned + ' / '),
             h('input', { type: 'number', min: 0, max: 200, step: 1, class: 'tgt' + (pending ? ' dirty' : ''), disabled: working,
-              value: pending ? pending.value : c.target, title: 'Target for ' + r.name,
+              'data-tk': targetKey(ev, r), value: pending ? pending.value : c.target,
+              title: 'Target for ' + r.name + (daysOf(i) > 1 ? ' (VMS uses one daily target for all ' + daysOf(i) + ' days)' : ''),
               oninput: (e) => onTarget(ev, r, c.target, e.target) })]
           : h('a', { class: 'num', href: roleUrl(ev, r), target: '_blank', title: 'Open this role in VMS' },
             c.target == null ? c.assigned + (c.assigned === 1 ? ' person' : ' people') : c.assigned + ' / ' + c.target),
@@ -1505,7 +1514,7 @@
             firstCol(i) ? h('div', {},
               h('button', { class: 'lnk', title: allDays(i) ? 'One link for every day of this event' : '', onclick: (e) => copyInvite(ev, null, e.currentTarget) }, 'Event invite link'),
               h('button', { class: 'lnk', title: 'Copy the QR code image and open VMS\'s QR code page', onclick: (e) => copyQr(ev, e.currentTarget) }, 'QR code'))
-              : h('small', {}, 'Links and targets: see ' + evShort(loaded[loaded.findIndex((l) => l.ev.vmsId === ev.vmsId)].ev)))))),
+              : h('small', {}, 'Invite links: see ' + evShort(loaded[loaded.findIndex((l) => l.ev.vmsId === ev.vmsId)].ev)))))),
         h('tbody', {}, body)));
   }
 
@@ -1724,7 +1733,7 @@
         await svcPost('UpdateTarget', { eventID: ev.vmsId, roleID: r.id, isCustom: r.custom, target: value });
         ok += 1;
       } catch (e) {
-        failed.push(r.name + ' on ' + evShort(ev) + ' (' + e.message + ')');
+        failed.push(r.name + ' on ' + (ev.multi ? ev.name + ' (every day)' : evShort(ev)) + ' (' + e.message + ')');
       }
     }
     await reloadEvents(touched);
