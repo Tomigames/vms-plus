@@ -12,7 +12,7 @@ In VMS itself you staff one event and one role at a time. You open each role's p
 
 ### Staff several events at once
 
-Pick a role and see who is in it on each day, how many slots are open, and who applied. One click assigns someone to one day or to all of them.
+Pick a role and see who is in it on each day, how many slots are open, and who applied. One click assigns someone to one day or to all of them. Multi-day events get a column per day, and each event's setup day (the day before) can be shown too.
 
 ![Staffing tab: the Judge role across two events, with open slots, staged assignments and age warnings](docs/staffing.png)
 
@@ -20,6 +20,7 @@ Pick a role and see who is in it on each day, how many slots are open, and who a
 - **Youth Protection.** People who haven't cleared Youth Protection screening are shown but can't be assigned.
 - **Nothing changes until you confirm.** Assignments are *staged* first and shown as `+`. You review the list, then apply them all at once. Your staged changes survive a page reload.
 - **Applicant tools.** Search by name, show people who applied for other roles or are already assigned elsewhere, and hide applicants who aren't a fit (VMS doesn't tell them).
+- **Coordinator comments at a glance.** A speech bubble marks anyone with coordinator comments on their VMS profile; hover to read them.
 
 ### See where every event stands
 
@@ -36,18 +37,22 @@ The Roles tab shows each role's assigned / target count for every event. Short r
 
 The People tab lists everyone across the loaded events, with what they're doing each day and flags for anything that needs attention.
 
-![People tab: each volunteer's role and shift per event, with flags such as Minor, Not notified and Consent not signed](docs/people.png)
+![People tab: each volunteer's role and shift per event, with a volunteer's details pane open on the right](docs/people.png)
 
 - **Flags:** needs clearance, minor, not notified, no shift set, training incomplete, consent not signed, assigned some days only, role differs by day, and here last season.
 - **Filter and export.** Filter by status or role, copy everyone's emails for a BCC, download the roster, or copy it straight into Google Sheets.
-- **Reminder drafts.** One click opens a Gmail draft for each person who still owes clearance, training or the consent form. You review and send them yourself.
-- **Volunteer details.** Click a name to see their other applications, past seasons and coordinator comments.
+- **Reminder drafts.** One click opens an email draft for each person who still owes clearance, training or the consent form. You review and send them yourself.
+- **Volunteer details.** Click a name anywhere for a side pane: what they're doing at your events first, then clearance and paperwork, their profile, this season's assignments, past seasons grouped by role, and coordinator comments (FIRST support emails are kept separate and folded away). Step through a list with ‹ › or the arrow keys.
 
 ### Bulk actions
 
 - **Shift times:** set one shift time per event, or per role, and apply it to every assigned shift. This replaces VMS's 6am–10pm default.
 - **Notify:** send the standard VMS assignment email to everyone you've assigned, across all events, in one go.
 - **Message:** email everyone in chosen roles and events by status: notified, tentative, unassigned applicants, or everyone.
+
+### Your email, your choice
+
+Pick where email opens from the **Email** menu at the top: Gmail (optionally a specific Google account), Outlook for work or school, Outlook.com, or your computer's own email app. Reminder drafts and volunteer email links both use it. VMS+ asks the first time you need it.
 
 ## Typical weekend
 
@@ -62,7 +67,7 @@ The People tab lists everyone across the loaded events, with what they're doing 
 
 - **Read-only until you confirm.** Loading only reads from VMS. Every change (assigning, targets, emails) is shown as a preview first and happens only when you confirm it.
 - **It uses your own VMS login.** VMS+ can only see and do what your VMS account already can.
-- **No servers.** Everything runs in your browser. Nothing is sent anywhere except VMS itself and the Gmail drafts you choose to open. Volunteer details stay in memory. The browser saves only your settings and staged changes, stored as ID numbers without names or emails.
+- **No servers.** Everything runs in your browser. Nothing is sent anywhere except VMS itself and the email drafts you choose to open (in Gmail, Outlook or your email app). Volunteer details stay in memory. The browser saves only your settings and staged changes, stored as ID numbers without volunteers' names or emails. If you give a Gmail account to use, that address of yours is saved with your settings.
 - **Gentle on VMS.** VMS+ limits how fast it sends requests, retries when VMS is slow, and pauses if VMS asks it to back off.
 
 ## Install
@@ -78,5 +83,5 @@ To update, replace the folder's files with the new version and click the reload 
 
 - `manifest.json`: the extension manifest (Manifest V3)
 - `content.js`: the dashboard, which runs on VMS pages
-- `background.js`: opens Gmail drafts and VMS pages in background tabs
+- `background.js`: opens email drafts (Gmail or Outlook on the web) and VMS pages in background tabs
 - `docs/`: README screenshots
