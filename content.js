@@ -58,10 +58,15 @@
   // reads go one at a time and the failed one is tried again after a pause.
   let svcLimit = CONCURRENCY, svcActive = 0;
   const svcWaiting = [];
-  async function svcSlot() {
-    while (svcActive >= svcLimit) await new Promise((r) => svcWaiting.push(r));
+  // A priority request (the details pane someone just opened) waits at the front of the line.
+  async function svcSlot(priority) {
+    while (svcActive >= svcLimit) await new Promise((r) => (priority ? svcWaiting.unshift(r) : svcWaiting.push(r)));
     svcActive++;
   }
+  // After a server error requests go one at a time; once enough succeed in a row, back to full speed.
+  let svcOkStreak = 0;
+  // Details-pane requests still loading: background work waits for them.
+  let paneBusy = 0;
   function svcFree() {
     svcActive--;
     const next = svcWaiting.shift();
@@ -70,13 +75,13 @@
   const pause = (ms) => new Promise((r) => setTimeout(r, ms));
   const RETRY_WAITS = [2000, 6000, 15000];
 
-  async function svc(method, params) {
+  async function svc(method, params, priority) {
     const q = Object.entries(params)
       .map(([k, v]) => k + '=' + encodeURIComponent(typeof v === 'string' ? JSON.stringify(v) : v))
       .join('&');
     let res;
     for (let attempt = 0; ; attempt++) {
-      await svcSlot();
+      await svcSlot(priority);
       let failed = '';
       try {
         res = await vfetch(SVC + method + '?' + q, {
@@ -88,9 +93,12 @@
         if (Date.now() < blockedUntil) throw e; // rate limited: retrying would only extend the block
         failed = e.message || 'network error';
       } finally { svcFree(); }
-      if (!failed) break;
+      if (!failed) {
+        if (svcLimit < CONCURRENCY && ++svcOkStreak >= 10) { svcLimit = CONCURRENCY; svcOkStreak = 0; }
+        break;
+      }
       if (attempt >= RETRY_WAITS.length) throw new Error(method + ' failed (' + failed + ')');
-      svcLimit = 1;
+      svcLimit = 1; svcOkStreak = 0;
       await pause(RETRY_WAITS[attempt]);
     }
     if (!res.ok) throw new Error(method + ' failed (HTTP ' + res.status + ')');
@@ -769,6 +777,20 @@
     .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
     .bar .grow { flex: 1; }
     .muted { color: var(--muted); }
+    .mailask { position: absolute; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.35); }
+    .mailbox { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; width: min(460px, 92%); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); }
+    .mailbox .sub { margin: 4px 0 12px; }
+    .mailopts { display: grid; gap: 6px; margin-bottom: 10px; }
+    .mailopts button { display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 1px; }
+    .mailopts button small { color: var(--muted); font-size: 12px; }
+    .mailopts .gacct { display: grid; gap: 4px; margin: -2px 0 6px 12px; font-size: 12px; color: var(--muted); }
+    .mailopts .gacct input { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+    .mailopts .gacct .bad { color: var(--bad); }
+    select.mailsel { max-width: 300px; field-sizing: content; } /* as wide as the choice shown, not the longest one */
+    .spin { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: vcspin 0.8s linear infinite; }
+    @keyframes vcspin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
+    .status { white-space: nowrap; }
     .msg { padding: 10px 12px; border-radius: 6px; margin-bottom: 10px; background: var(--infobg); color: var(--info); }
     .msg.err { background: var(--badbg); color: var(--bad); }
     table { border-collapse: collapse; width: 100%; background: var(--panel); }
@@ -837,12 +859,46 @@
     input.tgt.bad { border-color: var(--bad); background: var(--badbg); }
     .chip.plain.click { cursor: pointer; }
     .panel { position: absolute; top: 0; right: 0; bottom: 0; width: min(480px, 100%); z-index: 5; overflow: auto;
-      background: var(--panel); border-left: 1px solid var(--line); box-shadow: -4px 0 16px rgba(0,0,0,.18); padding: 14px 16px 28px; }
+      background: var(--panel); border-left: 1px solid var(--line); box-shadow: -4px 0 16px rgba(0,0,0,.18); padding: 14px 16px 28px;
+      transition: transform 140ms ease-out, opacity 140ms ease-out; }
+    .panel.away { transform: translateX(16px); opacity: 0; }
+    .panel.instant { transition: none; }
+    @media (prefers-reduced-motion: reduce) { .panel { transition: none; } }
     .panel h2 { margin: 0; font-size: 17px; }
     .panel h3 { margin: 18px 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 3px; }
     .kv { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 3px 10px; margin: 0; }
     .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+    /* Training: the course name wraps, the status stays in its own column. */
+    .tlist .trow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: baseline; padding: 1px 0; }
+    .tlist .trow .chip { margin: 0; }
+    .tlist .tok { color: var(--ok); }
+    .panel .tok { color: var(--ok); } .panel .twarn { color: var(--warn); }
+    .panel .arow + .arow { margin-top: 4px; }
+
+    .tlist details.tfold { margin: 0; }
+    .vcnote.notejump { cursor: pointer; margin-left: 10px; vertical-align: 1px; }
+    .tlist details.tfold > summary { cursor: pointer; color: var(--muted); padding: 1px 0; }
+    .tlist details.tfold[open] > summary { margin-bottom: 2px; }
+    .tlist details.tfold > .trow { padding-left: 14px; }
     .panel ul { margin: 0; padding-left: 18px; } .panel li { margin-bottom: 3px; }
+    /* Fixed columns, so the counts and years line up whatever the role name or year span. */
+    details.hist > summary { display: grid; grid-template-columns: 10px minmax(0, 1fr) 8ch 9ch; column-gap: 8px; align-items: baseline; padding: 3px 0; cursor: pointer; list-style: none; }
+    details.hmore > summary { grid-template-columns: 10px minmax(0, 1fr); }
+    details.hist > summary::-webkit-details-marker { display: none; }
+    details.hist > summary::before { content: '▸'; color: var(--muted); width: 10px; flex: none; }
+    details.hist[open] > summary::before { content: '▾'; }
+    details.hist .hrole { font-weight: 600; }
+    details.hist .hmeta { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    details.hist .hcount { text-align: right; }
+    details.hist > ul { margin: 2px 0 8px 18px; font-size: 13px; color: var(--muted); }
+    details.hmore > details.hist { margin-left: 0; }
+    details.support { margin-top: 10px; }
+    details.snote > summary { display: grid; grid-template-columns: 11ch minmax(0, 1fr); gap: 8px; padding: 3px 0 3px 18px; cursor: pointer; list-style: none; font-size: 13px; color: var(--muted); }
+    details.snote > summary::-webkit-details-marker { display: none; }
+    details.snote .sdate { font-variant-numeric: tabular-nums; }
+    details.snote .stext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    details.snote[open] .stext { white-space: normal; display: none; }
+    details.snote .sfull { margin: 0 0 8px 18px; padding: 6px 8px; border-left: 2px solid var(--line); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .prow button { padding: 3px 10px; margin-left: 4px; }
     .field { display: block; margin-bottom: 10px; }
     .field span { display: block; font-weight: 600; margin-bottom: 3px; }
@@ -870,6 +926,12 @@
     table.rt tr.stagedrow td { background: var(--infobg); }
     .cell { display: flex; align-items: center; gap: 6px; }
     .xbtn { border: none; background: none; padding: 0 2px; color: var(--muted); }
+    .xbtn.paneclose { font-size: 24px; line-height: 1; padding: 0 6px; border-radius: 6px; cursor: pointer; }
+    .panenav { display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; font-size: 12px; white-space: nowrap; }
+    .panenav .xbtn { font-size: 22px; line-height: 1; padding: 0 6px; border-radius: 6px; cursor: pointer; }
+    .panenav .xbtn:hover:not(:disabled) { color: var(--ink); background: var(--bg); }
+    .panenav .xbtn:disabled { opacity: 0.35; cursor: default; }
+    .xbtn.paneclose:hover { color: var(--ink); background: var(--bg); }
     .slots { display: grid; gap: 4px 6px; align-items: center; }
     .slothead { font-weight: 600; padding: 0 8px; }
     .slothead small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
@@ -900,8 +962,17 @@
     return el;
   }
   const chip = (tone, label, title) => h('span', { class: 'chip ' + tone, title }, label);
-  const noteText = (rows) => rows.map((r) => (r.postedDate ? r.postedDate + (r.postedBy ? ', ' + r.postedBy : '') + ': ' : '') + r.note).join('\n\n');
+  // VMS sends comment dates as "/Date(1292907600000)/"; anything else is shown as it came.
+  const noteDate = (d) => {
+    const m = /\/Date\((-?\d+)/.exec(String(d || ''));
+    return m ? new Date(Number(m[1])).toLocaleDateString() : String(d || '');
+  };
+  // FIRST's support system (TARDIS) now copies its case notes, emails and chats into a volunteer's coordinator
+  // comments. Its entries are posted by "TARDIS-…"; real coordinator notes come from VMS (or the older VIMS / FileMaker).
+  const isSupportNote = (r) => /^TARDIS-/i.test(String(r.postedBy || ''));
+  const noteText = (rows) => rows.map((r) => (r.postedDate ? noteDate(r.postedDate) + ': ' : '') + r.note.trim()).join('\n\n');
   const usableNotes = (rows) => (Array.isArray(rows) ? rows.filter((r) => r && typeof r.note === 'string' && r.note.trim()) : []);
+  const coordinatorNotes = (rows) => usableNotes(rows).filter((r) => !isSupportNote(r));
   // A speech-bubble mark next to someone with coordinator comments; hovering shows them.
   const noteMark = (id) => {
     const rows = vcNotes.get(id);
@@ -1036,6 +1107,13 @@
 
   // ---------- Shift-time settings (per event, with optional per-role times) ----------
 
+  // Where email opens. For Gmail, an optional address picks which signed-in Google account it opens in.
+  const MAILERS = [
+    ['gmail', 'Gmail', 'Opens in Gmail in your browser'],
+    ['outlook', 'Outlook (work or school)', 'Outlook on the web for Microsoft 365 accounts'],
+    ['outlookcom', 'Outlook.com (personal)', 'Outlook on the web for Hotmail, Live and Outlook.com'],
+    ['default', 'Default email app', 'Desktop Outlook, Apple Mail or whatever your computer uses'],
+  ];
   const TIMES_KEY = 'vcDash.shiftTimes.v1';
   const MIN_TIME = '06:00', MAX_TIME = '22:00';
   function readTimes() {
@@ -1104,7 +1182,7 @@
       staged: Array.isArray(d.staged) ? d.staged.filter((x) => x && x.evId && x.role && x.peopleId) : [],
       notify: d.notify || {},
       selected: Array.isArray(d.selected) ? d.selected : null,
-      tab: d.tab, staffRole: d.staffRole, showAssigned: !!d.showAssigned, hideZero: !!d.hideZero, hideLast: !!d.hideLast, staffMode: d.staffMode === 'slot' ? 'slot' : 'person', theme: ['light', 'dark'].includes(d.theme) ? d.theme : 'auto',
+      tab: d.tab, staffRole: d.staffRole, showAssigned: !!d.showAssigned, hideZero: !!d.hideZero, hideLast: !!d.hideLast, staffMode: d.staffMode === 'slot' ? 'slot' : 'person', theme: ['light', 'dark'].includes(d.theme) ? d.theme : 'auto', mailer: /^gmail/.test(d.mailer || '') ? 'gmail' : MAILERS.some(([k]) => k === d.mailer) ? d.mailer : '', gmailAccount: typeof d.gmailAccount === 'string' ? d.gmailAccount : '',
       showNeeded: !!d.showNeeded, showOther: !!d.showOther, showAges: d.showAges !== false, hidePast: d.hidePast !== false, showSetup: d.showSetup !== false,
       reminded: d.reminded && typeof d.reminded === 'object' ? d.reminded : {},
     };
@@ -1114,7 +1192,7 @@
       staged: [...state.staged, ...state.parked].map((x) => ({ evId: x.evId, role: x.role, peopleId: x.peopleId, ...(x.remove ? { remove: true } : {}) })),
       notify: { subject: state.notify.subject, message: state.notify.message, bcc: state.notify.bcc },
       selected: state.events.length ? [...state.selected] : saved.selected,
-      tab: state.tab, staffRole: state.staffRole, showAssigned: state.showAssigned, hideZero: state.hideZero, hideLast: state.hideLast, staffMode: state.staffMode, theme: state.theme, showNeeded: state.showNeeded, showOther: state.showOther, showAges: state.showAges, hidePast: state.hidePast, showSetup: state.showSetup,
+      tab: state.tab, staffRole: state.staffRole, showAssigned: state.showAssigned, hideZero: state.hideZero, hideLast: state.hideLast, staffMode: state.staffMode, theme: state.theme, mailer: state.mailer, gmailAccount: state.gmailAccount, showNeeded: state.showNeeded, showOther: state.showOther, showAges: state.showAges, hidePast: state.hidePast, showSetup: state.showSetup,
       reminded: state.reminded,
     };
     try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(data)); } catch (e) { /* progress just won't persist */ }
@@ -1166,7 +1244,7 @@
     msg: { evs: null, aud: '0', allRoles: true, roles: new Set(), subject: '', message: '', bcc: false, confirming: false, sending: false, error: '', result: null },
     targetEdit: false, targetEdits: new Map(), targetConfirm: false, targetApplying: false, targetResult: null, copyFrom: 0, copyTo: 1,
     notify: { subject: saved.notify.subject || '', message: saved.notify.message || '', bcc: !!saved.notify.bcc, other: false, otherEmail: '', picks: new Map(), confirming: false, sending: false, error: '', result: null }, progress: '', error: '',
-    note: '', drafting: false, theme: saved.theme, staffMode: saved.staffMode, showNeeded: saved.showNeeded, showOther: saved.showOther, fill: null, onlyShort: false, hideZero: saved.hideZero, hideLast: saved.hideLast, showAges: saved.showAges, hidePast: saved.hidePast, showSetup: saved.showSetup, reminded: saved.reminded, sort: 'name', search: '', status: 'all', role: '', toast: '',
+    note: '', drafting: false, theme: saved.theme, mailer: saved.mailer, gmailAccount: saved.gmailAccount, mailerAsk: null, staffMode: saved.staffMode, showNeeded: saved.showNeeded, showOther: saved.showOther, fill: null, onlyShort: false, hideZero: saved.hideZero, hideLast: saved.hideLast, showAges: saved.showAges, hidePast: saved.hidePast, showSetup: saved.showSetup, reminded: saved.reminded, sort: 'name', search: '', status: 'all', role: '', toast: '',
   };
 
   const host = document.createElement('div');
@@ -1243,8 +1321,10 @@
     state.toTop = false;
     root.classList.toggle('dark', state.theme === 'dark');
     root.classList.toggle('light', state.theme === 'light');
-    root.replaceChildren();
-    headerEl = h('header');
+    // Someone using a menu or the event search in the header keeps it: replacing it would close the menu.
+    const keep = headerBusy();
+    [...root.childNodes].forEach((n) => { if (!(keep && n === headerEl)) n.remove(); });
+    if (!keep) headerEl = h('header');
     mainEl = h('main');
     const tabs = h('div', { class: 'tabs' },
       [['staff', staffLabel()], ['roles', 'Roles'], ['people', 'People (' + state.people.length + ')'],
@@ -1255,20 +1335,57 @@
       h('button', { class: 'lnk diagbtn', title: 'Copy version, load details and recent errors to paste into a bug report. No names or emails.',
         onclick: (e) => copyDiagnostics(e.currentTarget) }, 'Copy diagnostics'));
     tabsEl = tabs;
-    root.append(headerEl, tabs, mainEl, panelEl);
+    if (!keep) root.append(headerEl);
+    root.append(tabs, mainEl, panelEl);
     renderPanel();
     if (state.toast) root.append(h('div', { class: 'toast' }, state.toast));
+    if (state.mailerAsk) root.append(mailerChooser());
     renderHeader();
     renderMain();
     mainEl.scrollTop = top;
   }
 
+  // True while a header menu is open or the event search is being typed in.
+  function headerBusy() {
+    const a = shadow.activeElement;
+    return !!(headerEl && headerEl.isConnected && a && headerEl.contains(a) && (a.tagName === 'SELECT' || a.classList.contains('evsearch')));
+  }
+  let headerStale = false;
   function renderHeader() {
     if (!headerEl) return;
+    if (headerBusy()) {
+      // Only the loading status changes now; the rest is redrawn once they're done with the menu.
+      const st = headerEl.querySelector('.status');
+      if (st) st.replaceChildren(...(state.progress || state.note ? [h('span', { class: 'spin', 'aria-hidden': 'true' }), state.progress || state.note] : []));
+      const go = headerEl.querySelector('button.primary');
+      if (go) { go.disabled = state.busy; go.textContent = state.loaded.length ? 'Refresh' : 'Load'; }
+      headerEl.querySelectorAll('label[data-ev] input').forEach((b) => { b.disabled = state.busy; });
+      headerEl.querySelectorAll('button.evclear').forEach((b) => {
+        b.disabled = state.busy || (b.textContent === 'Uncheck all' && !state.selected.size) || (/setup days/.test(b.textContent) && state.staffApplying);
+      });
+      if (!headerStale) {
+        headerStale = true;
+        shadow.activeElement.addEventListener('blur', () => { headerStale = false; setTimeout(renderHeader, 0); }, { once: true });
+      }
+      return;
+    }
     headerEl.replaceChildren(
       h('h1', {}, 'VMS+'),
       eventPicker(),
-      h('span', { class: 'muted' }, state.progress || state.note),
+      // While anything is loading, a small spinner sits by the status. Nothing waits on it: the dashboard stays usable.
+      h('span', { class: 'muted status' }, state.progress || state.note ? [h('span', { class: 'spin', 'aria-hidden': 'true' }), state.progress || state.note] : ''),
+      h('select', { class: 'mailsel', title: 'Where email drafts and email links open',
+        onchange: (e) => {
+          const v = e.target.value;
+          e.target.blur();
+          // Choosing Gmail (or changing its account) asks which account, the rest switch straight away.
+          if (v === 'gmail' || v === 'gmail-account') { state.mailerAsk = () => {}; render(); return; }
+          state.mailer = v; saveDrafts(); render();
+        } },
+        !state.mailer ? h('option', { value: '', selected: true, disabled: true }, 'Email: choose…') : null,
+        MAILERS.map(([k, label]) => h('option', { value: k, selected: state.mailer === k,
+          title: (MAILERS.find((m) => m[0] === k) || [])[2] }, 'Email: ' + label + (k === 'gmail' && state.mailer === 'gmail' && state.gmailAccount ? ' (' + state.gmailAccount + ')' : ''))),
+        state.mailer === 'gmail' ? h('option', { value: 'gmail-account' }, 'Change Gmail account\u2026') : null),
       h('button', {
         title: 'Auto follows your computer\u2019s light or dark setting. Click to change.',
         onclick: () => { state.theme = { auto: 'dark', dark: 'light', light: 'auto' }[state.theme]; saveDrafts(); render(); },
@@ -1280,7 +1397,12 @@
     if (!eventsCompact) setTimeout(() => {
       const el = headerEl && headerEl.querySelector('.events');
       if (!eventsCompact && el && el.isConnected && el.scrollWidth > el.clientWidth + 1) { eventsCompact = true; renderHeader(); }
+      placePanel();
     }, 0);
+  }
+  // The details pane starts below the header, so the loading status and the header buttons stay in view.
+  function placePanel() {
+    if (headerEl && headerEl.isConnected) panelEl.style.top = headerEl.offsetHeight + 'px';
   }
 
   // Event checkboxes in a row, or in a dropdown when the row would overflow.
@@ -1909,8 +2031,11 @@
           const done = shown.filter((p) => draftedWhen(p)).length;
           return h('div', { class: 'bar', style: 'margin:8px 0 0' },
             h('button', { class: 'primary', disabled: !todo.length || state.drafting, onclick: () => draftBatch(todo) },
-              state.drafting ? 'Opening drafts…' : !todo.length ? 'All drafted' : todo.length <= DRAFT_BATCH ? 'Draft all ' + todo.length : 'Draft next ' + DRAFT_BATCH + ' of ' + todo.length),
-            h('span', {}, 'Opens each person\u2019s draft in a background Gmail tab. Review and send them there.'),
+              state.drafting ? 'Opening drafts…' : !todo.length ? 'All drafted' : state.mailer === 'default' ? 'Draft next (' + todo.length + ' left)'
+                : todo.length <= DRAFT_BATCH ? 'Draft all ' + todo.length : 'Draft next ' + DRAFT_BATCH + ' of ' + todo.length),
+            h('span', {}, !state.mailer ? 'Opens each person\u2019s draft in your email. Review and send them there.'
+              : state.mailer === 'default' ? 'Opens each person\u2019s draft in your email app, one at a time.'
+                : 'Opens each person\u2019s draft in a background ' + mailerName() + ' tab. Review and send them there.'),
             done ? h('button', { class: 'lnk', title: 'Lets you draft these people again, for a second round of reminders',
               onclick: () => { shown.forEach((p) => REMIND_KINDS.forEach((k) => { if (state.reminded[k]) delete state.reminded[k][p.id]; })); renderMain(); } },
               'Clear drafted marks (' + done + ')') : null);
@@ -1989,31 +2114,94 @@
     state.reminded[k] = state.reminded[k] || {};
     state.reminded[k][p.id] = Date.now();
   });
-  const reminderLink = (p) => {
-    const t = reminderText(owed(p), p);
-    return 'mailto:' + encodeURIComponent(p.email) + '?subject=' + encodeURIComponent(t.subject) + '&body=' + encodeURIComponent(t.body.replace(/\n/g, '\r\n'));
-  };
-  // The extension's background script opens a draft as a Gmail compose tab behind this one.
+  const reminderMsg = (p) => ({ to: p.email, ...reminderText(owed(p), p) });
+  // The extension's background script opens a draft in a tab behind this one.
   // It is only there in the installed extension, and not in a VMS tab left open from before the extension was reloaded.
   const canBackground = () => { try { return typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.id; } catch (e) { return false; } };
-  const backgroundDraft = (mailto, offset) => new Promise((resolve) => {
+  const backgroundDraft = (url, offset) => new Promise((resolve) => {
     try {
-      chrome.runtime.sendMessage({ type: 'vc-draft', mailto, offset }, (res) => resolve(!chrome.runtime.lastError && !!res && !!res.ok));
+      chrome.runtime.sendMessage({ type: 'vc-draft', url, offset }, (res) => resolve(!chrome.runtime.lastError && !!res && !!res.ok));
     } catch (e) { resolve(false); }
   });
+  // Where a new email opens, from the Email setting: a compose page for web mail, or a mailto: link for the
+  // computer's own email app.
+  const composeUrl = (m, mailer) => {
+    const e = encodeURIComponent, to = m.to || '', subject = m.subject || '', body = m.body || '';
+    if (mailer === 'gmail') {
+      // With an address, Gmail opens in that signed-in account whatever its place in the account list.
+      const who = (state.gmailAccount || '').trim();
+      return 'https://mail.google.com/mail/' + (who ? '?authuser=' + e(who) + '&' : 'u/0/?') + 'view=cm&fs=1&tf=1&to=' + e(to) + '&su=' + e(subject) + '&body=' + e(body);
+    }
+    if (mailer === 'outlook') return 'https://outlook.office.com/mail/deeplink/compose?to=' + e(to) + '&subject=' + e(subject) + '&body=' + e(body);
+    if (mailer === 'outlookcom') return 'https://outlook.live.com/mail/0/deeplink/compose?to=' + e(to) + '&subject=' + e(subject) + '&body=' + e(body);
+    return 'mailto:' + e(to) + '?subject=' + e(subject) + '&body=' + e(body.replace(/\n/g, '\r\n'));
+  };
+  const mailerName = () => (MAILERS.find(([k]) => k === state.mailer) || [, 'your email'])[1]
+    + (state.mailer === 'gmail' && state.gmailAccount ? ' (' + state.gmailAccount + ')' : '');
+  // Open one email draft. Web mail opens behind this tab when it can (in front otherwise); the email app opens itself.
+  async function openEmail(m, offset) {
+    const url = composeUrl(m, state.mailer);
+    if (url.startsWith('mailto:')) { h('a', { href: url }).click(); return 'app'; }
+    if (canBackground() && await backgroundDraft(url, offset || 0)) return 'background';
+    return window.open(url, '_blank', 'noopener') ? 'front' : '';
+  }
+  // Run an email action, asking once where email should open if that hasn't been chosen yet.
+  function withMailer(fn) {
+    if (state.mailer) { fn(); return; }
+    state.mailerAsk = fn;
+    render();
+  }
+  const looksLikeEmail = (t) => /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(t);
+  function mailerChooser() {
+    if (!state.mailerAsk) return null;
+    let account = state.gmailAccount || '';
+    let box = null, warn = null;
+    const pick = (k) => {
+      if (k === 'gmail' && account.trim() && !looksLikeEmail(account.trim())) { warn.hidden = false; box.focus(); return; }
+      const then = state.mailerAsk;
+      state.mailer = k;
+      if (k === 'gmail') state.gmailAccount = account.trim();
+      state.mailerAsk = null; saveDrafts(); render();
+      toast('Email will open in ' + mailerName() + '. Change it any time with the Email menu at the top.');
+      then();
+    };
+    return h('div', { class: 'mailask', role: 'dialog', 'aria-label': 'Where should email open?' },
+      h('div', { class: 'mailbox' },
+        h('strong', {}, 'Where should email open?'),
+        h('div', { class: 'sub' }, 'VMS+ remembers this. You can change it any time with the Email menu at the top.'),
+        h('div', { class: 'mailopts' }, MAILERS.map(([k, label, hint]) => [
+          h('button', { onclick: () => pick(k) }, h('span', {}, label), h('small', {}, hint)),
+          k === 'gmail' ? h('label', { class: 'gacct' }, h('span', {}, 'Signed into more than one Google account? Type the one to use:'),
+            box = h('input', { type: 'email', value: account, placeholder: 'you@gmail.com (optional)',
+              oninput: (e) => { account = e.target.value; warn.hidden = true; },
+              onkeydown: (e) => { if (e.key === 'Enter') pick('gmail'); } }),
+            warn = h('small', { class: 'bad', hidden: true }, 'That doesn\u2019t look like an email address.')) : null,
+        ])),
+        h('button', { class: 'lnk', onclick: () => { state.mailerAsk = null; render(); } }, 'Cancel')));
+  }
 
-  async function draftReminder(p) {
-    const mailto = reminderLink(p);
-    markDrafted(p);
-    renderMain();
-    // If the background route is not available (or fails), fall back to the computer's own mail handler.
-    if (canBackground() && await backgroundDraft(mailto, 0)) toast('Draft opened in a background tab.');
-    else h('a', { href: mailto }).click();
+  function draftReminder(p) {
+    withMailer(async () => {
+      const how = await openEmail(reminderMsg(p), 0);
+      if (!how) { toast('Could not open the draft. Allow pop-ups for this page and try again.'); return; }
+      markDrafted(p);
+      renderMain();
+      if (how === 'background') toast('Draft opened in a background tab.');
+    });
   }
 
   // Open the next batch of drafts, each in its own background tab, in list order.
   const DRAFT_BATCH = 10;
-  async function draftBatch(todo) {
+  function draftBatch(todo) { withMailer(() => draftBatchNow(todo)); }
+  async function draftBatchNow(todo) {
+    if (state.mailer === 'default') {
+      // An email app opens one draft per click, so do the first and let the button step through the rest.
+      const p = todo[0];
+      await openEmail(reminderMsg(p), 0);
+      markDrafted(p); renderMain();
+      toast('Opened the draft for ' + p.first + ' in your email app.' + (todo.length > 1 ? ' Click again for the next one.' : ''));
+      return;
+    }
     if (!canBackground()) {
       toast('Drafting several at once needs the installed extension. Reload this VMS page and try again.');
       return;
@@ -2022,7 +2210,7 @@
     state.drafting = true; renderMain();
     let opened = 0;
     for (const p of batch) {
-      if (!await backgroundDraft(reminderLink(p), opened)) break;
+      if (!await backgroundDraft(composeUrl(reminderMsg(p), state.mailer), opened)) break;
       markDrafted(p);
       opened += 1;
     }
@@ -2144,6 +2332,8 @@
     try {
       for (;;) {
         if (state.busy) break;
+        // Someone just opened a details pane: let its requests through first.
+        while (paneBusy > 0) await pause(150);
         const q = state.loaded.find((l) => l.src.roles.some((r) => r.unchecked));
         if (q) {
           const vmsId = q.ev.vmsId, role = q.src.roles.find((r) => r.unchecked);
@@ -2181,7 +2371,7 @@
           const id = waiting[0].id;
           let rows = [];
           try { rows = await svc('GetVCComments', { peopleID: id }); } catch (e) { if (Date.now() < blockedUntil) throw e; }
-          vcNotes.set(id, usableNotes(rows));
+          vcNotes.set(id, coordinatorNotes(rows));
           if (vcNotes.get(id).length) notesShown = false;
           // Show new marks every so often and at the end, but not while someone is typing.
           if (!notesShown && (waiting.length === 1 || ++notesSince >= 25)) {
@@ -2302,13 +2492,18 @@
       + '&IsCustom=' + (r.custom ? 'True' : 'False') + '&PeopleID=' + person.id;
   }
   const nameLink = (person, text) => h('a', {
-    class: 'pname', href: '#', title: 'Show details',
-    onclick: (e) => { e.preventDefault(); openDetail(person.id); },
+    class: 'pname', href: '#', title: 'Show details', 'data-pid': person.id,
+    onclick: (e) => { e.preventDefault(); openDetail(person.id, e.currentTarget); },
   }, text || person.first + ' ' + person.last);
 
-  function openDetail(id) {
+  function openDetail(id, from) {
     const person = state.people.find((x) => x.id === id);
     if (!person) return;
+    if (from) {
+      const ids = [];
+      mainEl.querySelectorAll('a.pname[data-pid]').forEach((a) => { const n = Number(a.dataset.pid); if (!ids.includes(n)) ids.push(n); });
+      state.detailList = ids.includes(id) ? ids : [id];
+    } else if (!(state.detailList || []).includes(id)) state.detailList = [id];
     state.detail = { id, extra: {} };
     renderPanel();
     const set = (key, value) => {
@@ -2317,11 +2512,15 @@
       renderPanel();
     };
     const evId = vmsEventOf(Object.keys(person.ev)[0]);
-    const want = (key, promise) => promise.then((v) => set(key, v), () => set(key, null));
-    want('season', svc('GetVolunteerAssignments', { peopleID: id, isCurrentSeason: true }));
-    want('history', svc('GetVolunteerAssignments', { peopleID: id, isCurrentSeason: false }));
-    want('others', svc('GetVolunteerApplications', { peopleID: id, eventID: evId, excludeEvent: true }));
-    want('comments', svc('GetVCComments', { peopleID: id }).then((rows) => { vcNotes.set(id, usableNotes(rows)); return rows; }));
+    // These go ahead of the background work, which also pauses until they're in (see background()).
+    const want = (key, promise) => {
+      paneBusy++;
+      return promise.then((v) => set(key, v), () => set(key, null)).finally(() => { paneBusy--; });
+    };
+    want('season', svc('GetVolunteerAssignments', { peopleID: id, isCurrentSeason: true }, true));
+    want('history', svc('GetVolunteerAssignments', { peopleID: id, isCurrentSeason: false }, true));
+    want('others', svc('GetVolunteerApplications', { peopleID: id, eventID: evId, excludeEvent: true }, true));
+    want('comments', svc('GetVCComments', { peopleID: id }, true).then((rows) => { vcNotes.set(id, coordinatorNotes(rows)); return rows; }));
     want('profile', fetchDoc(profileUrl(person)).then(({ doc }) => {
       const pick = (name) => txt(doc.getElementById('MainContent_' + name));
       // Split an element's text into lines wherever the page breaks it visually.
@@ -2349,12 +2548,53 @@
       };
     }));
   }
-  function closeDetail() { state.detail = null; renderPanel(); }
-  root.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.detail) closeDetail(); });
+  // The pane slides in and out a little (140ms); with reduced motion it just appears and disappears.
+  const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Previous / next person in the list the pane was opened from (also the ← and → keys).
+  function stepDetail(by) {
+    const list = state.detailList || [];
+    const at = state.detail ? list.indexOf(state.detail.id) : -1;
+    const next = list[at + by];
+    if (at < 0 || next == null) return;
+    // Keep the pane where it is: no slide when moving between people.
+    openDetail(next);
+  }
+  function closeDetail() {
+    if (!state.detail) return;
+    if (panelEl.hidden || reduceMotion()) { state.detail = null; renderPanel(); return; }
+    const closing = state.detail;
+    panelEl.classList.add('away');
+    setTimeout(() => {
+      panelEl.classList.remove('away');
+      // Someone else may have been opened meanwhile; then leave that pane open.
+      if (state.detail === closing) { state.detail = null; renderPanel(); }
+    }, 140);
+  }
+  // Esc closes the details pane wherever the keyboard focus is, inside the dashboard or on the VMS page behind it.
+  document.addEventListener('keydown', (e) => {
+    if (!state.detail || root.hidden) return;
+    if (e.key === 'Escape') { e.preventDefault(); closeDetail(); return; }
+    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      const t = e.composedPath()[0];
+      if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+      e.preventDefault();
+      stepDetail(e.key === 'ArrowLeft' ? -1 : 1);
+    }
+  }, true);
 
   function renderPanel() {
     const person = state.detail && state.people.find((x) => x.id === state.detail.id);
+    const opening = panelEl.hidden && !!person;
     panelEl.hidden = !person;
+    if (person) placePanel();
+    if (opening && !reduceMotion()) {
+      // Jump to the starting position without animating, make the browser apply it, then slide in from there.
+      panelEl.classList.add('away', 'instant');
+      void panelEl.offsetWidth;
+      panelEl.classList.remove('instant');
+      void panelEl.offsetWidth;
+      panelEl.classList.remove('away');
+    }
     panelEl.replaceChildren();
     if (!person) { state.detail = null; return; }
     const v = person.raw || {};
@@ -2368,37 +2608,232 @@
       ? h('ul', {}, items.slice(0, limit).map((t) => h('li', {}, t)), items.length > limit ? h('li', { class: 'muted' }, 'and ' + (items.length - limit) + ' more') : null)
       : h('div', { class: 'sub' }, 'None.'));
     // undefined = still loading, null = the request failed.
-    const lazy = (value, build) => (value === undefined ? h('div', { class: 'sub' }, 'Loading…')
+    const lazy = (value, build) => (value === undefined ? h('div', { class: 'sub' }, h('span', { class: 'spin', 'aria-hidden': 'true' }), 'Loading…')
       : value === null ? h('div', { class: 'sub' }, 'Could not load this from VMS.') : build(value));
     const loadedIds = new Set(state.loaded.map((l) => l.ev.vmsId));
+    // A screening status as a short colored chip; VMS's own wording is in the tooltip.
+    const clearanceChip = (text, cleared) => {
+      const t = String(text || '');
+      if (cleared === true || /^meets/i.test(t)) return chip('ok', 'Cleared', t);
+      if (/expir/i.test(t)) return chip('bad', 'Expired', t);
+      if (/pending|in progress|submitted|processing|review/i.test(t)) return chip('warn', 'In progress', t);
+      return chip('bad', 'Not cleared', t);
+    };
+    // VMS glues the season year onto event names in assignment lists ("Philadelphia Event2026", "Meet 32024");
+    // put the space back, using the event's own date to tell which digits are the year.
+    const eventName = (r) => {
+      const name = String(r.EventName || ''), d = dateOf(r.EventDateDisplay || r.EventStartDateDisplay);
+      if (!d) return name;
+      for (const y of [d.getFullYear(), d.getFullYear() - 1, d.getFullYear() + 1]) {
+        const ys = String(y);
+        if (name.length > 4 && name.endsWith(ys) && !/\s/.test(name[name.length - 5])) return name.slice(0, -4) + ' ' + ys;
+      }
+      return name;
+    };
+    // Past assignments grouped by role: one line per role with how often and when, each opening to its events.
+    const opened = state.detail.openRoles || (state.detail.openRoles = new Set());
+    const roleHistory = (rows, season) => {
+      // VMS also lists this season's events as previous ones; those are already shown above.
+      // FIRST seasons start in August, so anything dated since August 1 belongs to this season.
+      const today = new Date();
+      const seasonStart = new Date(today.getMonth() >= 7 ? today.getFullYear() : today.getFullYear() - 1, 7, 1);
+      const now = new Set(season.map((r) => r.EventDateDisplay + '|' + r.RoleName));
+      const past = rows.filter((r) => r.RoleName && !now.has(r.EventDateDisplay + '|' + r.RoleName)
+        && !((dateOf(r.EventDateDisplay) || 0) >= seasonStart));
+      if (!past.length) return h('div', { class: 'sub' }, 'None.');
+      const when = (r) => { const d = dateOf(r.EventDateDisplay); return d ? d.getTime() : 0; };
+      const groups = new Map();
+      past.forEach((r) => {
+        const k = r.RoleName.trim().toLowerCase();
+        if (!groups.has(k)) groups.set(k, { name: r.RoleName.trim(), rows: [] });
+        groups.get(k).rows.push(r);
+      });
+      const list = [...groups.values()].map((g) => {
+        g.rows.sort((a, b) => when(b) - when(a));
+        const years = g.rows.map((r) => (dateOf(r.EventDateDisplay) || { getFullYear: () => 0 }).getFullYear()).filter(Boolean);
+        g.first = Math.min(...years); g.last = Math.max(...years);
+        return g;
+      }).sort((a, b) => b.rows.length - a.rows.length || when(b.rows[0]) - when(a.rows[0]));
+      const firstYear = Math.min(...list.map((g) => g.first).filter((y) => isFinite(y) && y > 0));
+      const SHOWN = 8;
+      const row = (g) => h('details', { class: 'hist', open: opened.has(g.name),
+        ontoggle: (e) => { if (e.target.open) opened.add(g.name); else opened.delete(g.name); } },
+        h('summary', {}, h('span', { class: 'hrole' }, g.name),
+          h('span', { class: 'hmeta hcount' }, plural(g.rows.length, 'time')),
+          h('span', { class: 'hmeta' }, !isFinite(g.first) ? '' : g.first === g.last ? String(g.first) : g.first + '–' + g.last)),
+        h('ul', {}, g.rows.map((r) => h('li', {}, [r.EventDateDisplay, eventName(r)].filter(Boolean).join(' · ')))));
+      const more = list.length - SHOWN;
+      return h('div', {},
+        h('div', { class: 'sub', style: 'margin-bottom:4px' }, plural(past.length, 'assignment') + ' in ' + plural(list.length, 'role')
+          + (isFinite(firstYear) ? ' · volunteering since ' + firstYear : '')),
+        list.slice(0, SHOWN).map(row),
+        more > 0 ? h('details', { class: 'hist hmore', open: opened.has('*more'),
+          ontoggle: (e) => { if (e.target.open) opened.add('*more'); else opened.delete('*more'); } },
+          h('summary', {}, h('span', { class: 'hrole muted' }, plural(more, 'more role'))), list.slice(SHOWN).map(row)) : null);
+    };
+    // This season grouped by role, each role opening to its events and their status. Roles they're doing or applying
+    // for at the loaded events start open.
+    const seasonByRole = (rows) => {
+      if (!rows.length) return h('div', { class: 'sub' }, 'None.');
+      const groups = new Map();
+      rows.forEach((r) => { const k = String(r.RoleName || '').trim(); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); });
+      const isOpen = (name) => (myRoles.has(cleanRole(name).toLowerCase()) ? !opened.has('*nowc' + name) : opened.has('*now' + name));
+      const setOpen = (name, open) => {
+        opened.delete('*now' + name); opened.delete('*nowc' + name);
+        if (myRoles.has(cleanRole(name).toLowerCase())) { if (!open) opened.add('*nowc' + name); } else if (open) opened.add('*now' + name);
+      };
+      return h('div', {}, [...groups.entries()].sort((a, b) => b[1].length - a[1].length).map(([name, rs]) => h('details', { class: 'hist', open: isOpen(name),
+        ontoggle: (e) => setOpen(name, e.target.open) },
+        h('summary', {}, h('span', { class: 'hrole' }, name), h('span', { class: 'hmeta hcount' }, plural(rs.length, 'time')), h('span', { class: 'hmeta' }, '')),
+        h('ul', {}, rs.map((r) => h('li', {}, [r.EventDateDisplay, eventName(r), r.AssignmentStatus].filter(Boolean).join(' · ')))))));
+    };
 
-    const perEvent = state.loaded.filter((l) => person.ev[l.ev.id]).map(({ ev }) => {
-      const e = person.ev[ev.id];
-      const rec = (e.recs[0] || {}).v || {};
-      const comments = [...new Set(e.recs.map((r) => r.v.Comments).filter((t) => !blank(t)))];
-      return [h('h3', {}, evLabel(ev)), kv([
-        ['Assigned', e.assign.length ? e.assign.map((a) => h('div', {}, a.role,
-          a.shifts.map((sh) => [' ', sh.time, ' ', sh.notified ? chip('ok', 'Notified') : chip('warn', 'Not notified')]),
-          !a.shifts.length && !a.admin ? [' ', chip('warn', 'No shift set')] : null)) : 'Not assigned'],
-        ['Applied for', e.applied.length ? e.applied.slice().sort((a, b) => String(a.pref).localeCompare(String(b.pref), undefined, { numeric: true }))
-          .map((a) => h('div', {}, (a.pref ? '#' + a.pref + ' ' : '') + a.role + (a.times ? ' (done ' + a.times + (a.times === 1 ? ' time' : ' times') + ')' : ''))) : null],
-        ['Applied on', e.appliedOn ? new Date(e.appliedOn).toLocaleDateString() : null],
-        ['Days available', rec.DaysAvailable],
-        ['Last season here', e.lastSeason || null],
-        ['Training', e.training && e.training.length ? e.training.map((t) => h('div', {}, t.course, ' ',
-          t.done ? chip('ok', 'Done') : t.required ? chip('warn', 'Required, not done') : chip('info', 'Optional, not done'))) : null],
-        ['Their comment', comments.length ? comments.map((t) => h('div', {}, t)) : null],
-      ])];
+    // Training for one event: each course once, what still needs doing first; done and optional courses fold away.
+    const trainingBlock = (items, key) => {
+      const byName = new Map();
+      items.forEach((t) => {
+        const k = String(t.course || '').trim().toLowerCase();
+        if (!k) return;
+        const cur = byName.get(k) || { course: String(t.course).trim(), done: false, required: false };
+        cur.done = cur.done || !!t.done; cur.required = cur.required || !!t.required;
+        byName.set(k, cur);
+      });
+      const all = [...byName.values()].sort((a, b) => a.course.localeCompare(b.course));
+      const todo = all.filter((t) => !t.done && t.required), done = all.filter((t) => t.done), optional = all.filter((t) => !t.done && !t.required);
+      const row = (t, status) => h('div', { class: 'trow' }, h('span', {}, t.course), status);
+      // Folded lists need no status on each row: the heading says it.
+      const fold = (id, label, list) => (list.length ? h('details', { class: 'tfold', open: opened.has(key + id),
+        ontoggle: (e) => { if (e.target.open) opened.add(key + id); else opened.delete(key + id); } },
+        h('summary', {}, label), list.map((t) => row(t, null))) : null);
+      return h('div', { class: 'tlist' },
+        todo.map((t) => row(t, chip('warn', 'Required'))),
+        !todo.length ? h('div', { class: 'trow' }, h('span', { class: 'tok' }, done.length ? 'All required training done' : 'No required training')) : null,
+        fold(':done', plural(done.length, 'course') + ' done', done),
+        fold(':opt', plural(optional.length, 'optional course') + ' not done', optional));
+    };
+    // The roles they're doing or applying for at the loaded events, and those roles' courses: used to show what's
+    // relevant first.
+    const myRoles = new Set();
+    const roleCourses = new Set();
+    state.loaded.forEach((l) => {
+      const e = person.ev[l.ev.id];
+      if (!e) return;
+      [...e.assign, ...e.applied].forEach((a) => { const r = cleanRole(a.role).toLowerCase(); if (r && r !== 'assign me as needed') myRoles.add(r); });
+      (e.training || []).forEach((t) => { if (myRoles.has(cleanRole(t.role || '').toLowerCase())) roleCourses.add(String(t.course || '').trim().toLowerCase()); });
     });
+    // Each assignment on two lines: the role, then a smaller line with its time and whether VMS has emailed them.
+    // Long role names never push the status onto a line of its own.
+    const assignedLine = (e) => {
+      if (!e.assign.length) return 'Not assigned';
+      return e.assign.map((a) => h('div', { class: 'arow' }, h('div', {}, a.role),
+        a.shifts.length ? h('div', { class: 'sub' }, a.shifts.map((sh, i) => [i ? ' · ' : '', sh.time, ' · ',
+          sh.notified ? h('span', { class: 'tok' }, 'Notified') : h('span', { class: 'twarn' }, 'Not notified')]))
+          : !a.admin ? h('div', { class: 'sub' }, h('span', { class: 'twarn' }, 'No shift set')) : null));
+    };
+    const appliedLine = (e) => (e.applied.length ? e.applied.slice().sort((a, b) => String(a.pref).localeCompare(String(b.pref), undefined, { numeric: true }))
+      .map((a) => h('div', {}, (a.pref ? '#' + a.pref + ' ' : '') + a.role + (a.times ? ' (done ' + a.times + (a.times === 1 ? ' time' : ' times') + ')' : ''))) : null);
+    // One block per event. A multi-day event gets a line per day for what they're doing there, then the
+    // event-wide details (applications, availability, training) once. Training is for the event days: someone on a
+    // setup day is setting up, so their role's training doesn't apply to it.
+    const perEvent = (() => {
+      const cols = state.loaded.filter((l) => person.ev[l.ev.id]);
+      return [...new Set(cols.map((l) => l.ev.vmsId))].map((id) => {
+        const mine = cols.filter((l) => l.ev.vmsId === id);
+        const main = mine.find((l) => !l.ev.setup) || mine[0];
+        const e = person.ev[main.ev.id];
+        // VMS lists an application only on days they aren't assigned yet, so take it from whichever day has it,
+        // leaving out roles they already hold on another day of this event.
+        const held = new Set(mine.flatMap((l) => person.ev[l.ev.id].assign.map((a) => cleanRole(a.role).toLowerCase())));
+        const from = mine.map((l) => person.ev[l.ev.id]).find((d) => d.applied.length) || e;
+        const applied = { ...from, applied: from.applied.filter((a) => !held.has(cleanRole(a.role).toLowerCase())) };
+        const rec = (e.recs[0] || {}).v || {};
+        const comments = [...new Set(mine.flatMap((l) => person.ev[l.ev.id].recs.map((r) => r.v.Comments)).filter((t) => !blank(t)))];
+        return [h('h3', {}, mine.length > 1 ? main.ev.name : evLabel(main.ev)), kv([
+          ...(mine.length > 1 ? mine.map((l) => [evShort(l.ev), assignedLine(person.ev[l.ev.id])]) : [['Assigned', assignedLine(e)]]),
+          ['Applied for', appliedLine(applied)],
+          ['Applied on', applied.appliedOn ? new Date(applied.appliedOn).toLocaleDateString() : null],
+          ['Days available', rec.DaysAvailable],
+          ['Last season here', e.lastSeason || null],
+          ['Training', e.training && e.training.length && !main.ev.setup ? trainingBlock(e.training, 'tr' + id) : null],
+          ['Their comment', comments.length ? comments.map((t) => h('div', {}, t)) : null],
+        ])];
+      });
+    })();
 
+    // About and their VMS profile together as one "Profile" section; left out entirely when there's nothing in it.
+    // The page-based details (teams, skills, courses…) arrive a moment later than the rest.
+    const profilePairs = (pr) => [
+      ['Years with FIRST', v.InFIRST ? String(v.InFIRST) : null],
+      ['FIRST alumni', v.FlagIsAlumni ? 'Yes' : null],
+      ['Organization', blank(v.Organization) ? null : v.Organization],
+      ['Affiliations', !pr || blank(pr.orgs) || /no affiliation/i.test(pr.orgs) ? null : pr.orgs],
+      ['Team affiliations', !pr ? null : (() => {
+        const teams = pr.teams.filter((n) => !blank(n) && !/no affiliation/i.test(n));
+        // VMS writes "FRC Team# 321 RoboLancers"; show it as "FRC 321 RoboLancers".
+        return teams.length ? teams.map((n) => h('div', {}, n.replace(/^\s*(FRC|FTC|FLL)\s+Team\s*#\s*/i, (m, prog) => prog.toUpperCase() + ' '))) : null;
+      })()],
+      ['Skills', !pr || blank(pr.skills) ? null : pr.skills],
+      ['Shirt size', blank(v.ShirtSize) ? null : v.ShirtSize],
+      ['Dietary', !pr || blank(pr.dietary) ? null : pr.dietary],
+      ['Accommodations', !blank(v.PhysicalLimitations) ? v.PhysicalLimitations : !pr || blank(pr.limits) ? null : pr.limits],
+      ['Emergency contact', pr ? pr.emergency : null],
+      ['Training completed', !pr ? null : (() => {
+        // A finished training path (Mentor Ready, Volunteer Ready) is listed twice: the path itself and a
+        // "… Training Path Completion" entry. The second adds nothing when the first is there.
+        const named = (t) => t.replace(/^[\d/\s-]*-\s*/, '').trim().toLowerCase();
+        const have = new Set(pr.courses.map(named));
+        const shown = pr.courses.filter((t) => {
+          const m = /^(.*?)\s+training path completion$/i.exec(named(t));
+          return !(m && have.has(m[1]));
+        });
+        if (!shown.length) return null;
+        // Courses for the roles they're doing or applying for at the loaded events stay in view; the rest fold away.
+        const related = shown.filter((t) => {
+          const c = named(t);
+          return roleCourses.has(c) || [...myRoles].some((r) => r.length > 2 && new RegExp('\\b' + r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(c));
+        });
+        const rest = shown.filter((t) => !related.includes(t));
+        const fold = (label, items) => h('details', { class: 'tfold tlist', open: opened.has('*courses'),
+          ontoggle: (e) => { if (e.target.open) opened.add('*courses'); else opened.delete('*courses'); } },
+          h('summary', {}, label), items.map((t) => h('div', {}, t)));
+        return [related.map((t) => h('div', {}, t)),
+          rest.length ? fold(related.length ? plural(rest.length, 'other course') : plural(rest.length, 'course') + ' completed', rest) : null];
+      })()],
+    ];
+    const profileSection = () => {
+      const pr = x.profile || null;
+      const pairs = profilePairs(pr).filter(([, val]) => val != null && val !== '' && val !== false);
+      const tail = x.profile === undefined ? h('div', { class: 'sub' }, h('span', { class: 'spin', 'aria-hidden': 'true' }), 'Loading the rest of their profile…')
+        : x.profile === null ? h('div', { class: 'sub' }, 'Could not load the rest of their profile from VMS.') : null;
+      if (!pairs.length && !tail) return '';
+      return h('div', {}, h('h3', {}, 'Profile'), pairs.length ? kv(pairs) : null, tail);
+    };
     panelEl.append(
       h('div', { class: 'bar' },
-        h('h2', { class: 'grow' }, person.first + ' ' + person.last),
-        h('button', { onclick: closeDetail, title: 'Close (Esc)' }, 'Close')),
-      h('div', {}, person.flags.map((f) => chip(FLAG_TONE[f], FLAG_LABEL[f], f === 'clearance' ? person.clearance : ''))),
+        h('h2', { class: 'grow' }, person.first + ' ' + person.last,
+          // Coordinator comments are listed at the bottom. The same speech bubble as on Staffing, next to the name,
+          // says they're there: hovering shows them, clicking jumps to them.
+          Array.isArray(x.comments) && coordinatorNotes(x.comments).length ? h('span', { class: 'vcnote notejump', role: 'button', tabindex: 0,
+            title: 'Coordinator comments (click to jump to them):\n\n' + noteText(coordinatorNotes(x.comments)),
+            'aria-label': 'Has coordinator comments', onclick: () => {
+              const target = [...panelEl.querySelectorAll('h3')].find((el) => el.textContent === 'Coordinator comments');
+              if (target) panelEl.scrollTop = target.offsetTop - 8;
+            } }) : null),
+        (() => {
+          const list = state.detailList || [], at = list.indexOf(person.id);
+          if (list.length < 2 || at < 0) return null;
+          return h('span', { class: 'panenav' },
+            h('button', { class: 'xbtn', title: 'Previous person (\u2190)', 'aria-label': 'Previous person', disabled: at === 0, onclick: () => stepDetail(-1) }, '\u2039'),
+            h('span', { class: 'muted' }, (at + 1) + ' of ' + list.length),
+            h('button', { class: 'xbtn', title: 'Next person (\u2192)', 'aria-label': 'Next person', disabled: at === list.length - 1, onclick: () => stepDetail(1) }, '\u203a'));
+        })(),
+        h('button', { class: 'xbtn paneclose', onclick: closeDetail, title: 'Close (Esc)', 'aria-label': 'Close this volunteer' }, '×')),
+      person.flags.length ? h('div', {}, person.flags.map((f) => chip(FLAG_TONE[f], FLAG_LABEL[f], f === 'clearance' ? person.clearance : ''))) : '',
+      h('div', {}, perEvent),
       h('h3', {}, 'Contact'),
       kv([
-        ['Email', person.email ? h('a', { href: 'mailto:' + person.email }, person.email) : null],
+        ['Email', person.email ? h('a', { href: 'mailto:' + person.email, title: 'Write to them',
+          onclick: (e) => { e.preventDefault(); withMailer(() => openEmail({ to: person.email })); } }, person.email) : null],
         ['Phone', /^\d{10}$/.test(v.PhoneNumber || '') ? v.PhoneNumber.replace(/(\d{3})(\d{3})(\d{4})/, '($1) $2-$3') : v.PhoneNumber],
         ['Location', [v.City, v.State].filter(Boolean).join(', ')],
         ['Age', person.age != null ? person.age + (person.age < 18 ? ' (minor)' : '') : null],
@@ -2407,43 +2842,37 @@
       ]),
       h('h3', {}, 'Clearance and paperwork'),
       kv([
-        ['Youth protection', person.clearance || (person.cleared ? 'Meets requirements' : 'Not cleared')],
-        ['Pennsylvania', blank(v.YPPStatusPA) || /no known roles/i.test(v.YPPStatusPA) ? null : v.YPPStatusPA],
-        ['California', blank(v.YPPStatusCA) || /no known roles/i.test(v.YPPStatusCA) ? null : v.YPPStatusCA],
-        ['Consent and release', v.SignedConsentReleaseStatus],
-        ['Role training', v.IsCertified ? 'Certified for a role they applied to' : null],
+        ['Youth protection', clearanceChip(person.clearance || (person.cleared ? 'Meets requirements' : 'Not cleared'), person.cleared)],
+        ['Pennsylvania', blank(v.YPPStatusPA) || /no known roles/i.test(v.YPPStatusPA) ? null : clearanceChip(v.YPPStatusPA)],
+        ['California', blank(v.YPPStatusCA) || /no known roles/i.test(v.YPPStatusCA) ? null : clearanceChip(v.YPPStatusCA)],
+        ['Consent and release', blank(v.SignedConsentReleaseStatus) ? null
+          : /^signed/i.test(v.SignedConsentReleaseStatus) ? chip('ok', 'Signed', v.SignedConsentReleaseStatus)
+            : chip('warn', /unsigned|not signed/i.test(v.SignedConsentReleaseStatus) ? 'Not signed' : v.SignedConsentReleaseStatus, v.SignedConsentReleaseStatus)],
+        ['Role training', v.IsCertified ? chip('ok', 'Certified', 'Certified for a role they applied to') : null],
       ]),
-      h('div', {}, perEvent),
-      h('h3', {}, 'About'),
-      kv([
-        ['Years with FIRST', v.InFIRST ? String(v.InFIRST) : null],
-        ['FIRST alumni', v.FlagIsAlumni ? 'Yes' : null],
-        ['Shirt size', blank(v.ShirtSize) ? null : v.ShirtSize],
-        ['Organization', blank(v.Organization) ? null : v.Organization],
-        ['Accommodations', blank(v.PhysicalLimitations) ? null : v.PhysicalLimitations],
-      ]),
-      h('h3', {}, 'From their VMS profile'),
-      lazy(x.profile, (pr) => kv([
-        ['Dietary', blank(pr.dietary) ? null : pr.dietary],
-        ['Accommodations', blank(pr.limits) || !blank(v.PhysicalLimitations) ? null : pr.limits],
-        ['Emergency contact', pr.emergency],
-        ['Team affiliations', (() => {
-          const teams = pr.teams.filter((n) => !blank(n) && !/no affiliation/i.test(n));
-          return teams.length ? teams.map((n) => h('div', {}, n)) : null;
-        })()],
-        ['Affiliations', blank(pr.orgs) || /no affiliation/i.test(pr.orgs) ? null : pr.orgs],
-        ['Skills', blank(pr.skills) ? null : pr.skills],
-        ['Training completed', pr.courses.length ? pr.courses.map((t) => h('div', {}, t)) : null],
-      ])),
+      profileSection(),
       h('h3', {}, 'All assignments this season'),
-      lazy(x.season, (rows) => list(rows.map((r) => [r.EventDateDisplay, r.EventName, r.RoleName, r.AssignmentStatus].filter(Boolean).join(' · ')), 20)),
+      lazy(x.season, seasonByRole),
       h('h3', {}, 'Applied to other events'),
       lazy(x.others, (rows) => list([...new Set(rows.filter((r) => !loadedIds.has(r.EventID))
-        .map((r) => [r.EventStartDateDisplay, r.EventName].filter(Boolean).join(' · ')))], 12)),
+        .map((r) => [r.EventStartDateDisplay, eventName(r)].filter(Boolean).join(' · ')))], 12)),
       h('h3', {}, 'Previous seasons'),
-      lazy(x.history, (rows) => list(rows.map((r) => [r.EventDateDisplay, r.EventName, r.RoleName].filter(Boolean).join(' · ')), 12)),
+      lazy(x.history, (rows) => roleHistory(rows, Array.isArray(x.season) ? x.season : [])),
       h('h3', {}, 'Coordinator comments'),
-      lazy(x.comments, (rows) => list(rows.map((r) => (r.postedDate ? r.postedDate + ': ' : '') + r.note), 20)),
+      lazy(x.comments, (rows) => list(coordinatorNotes(rows).map((r) => (r.postedDate ? noteDate(r.postedDate) + ': ' : '') + r.note.trim()), 20)),
+      !Array.isArray(x.comments) ? '' : lazy(x.comments, (rows) => {
+        const support = usableNotes(rows).filter(isSupportNote);
+        if (!support.length) return null;
+        const flat = (t) => t.replace(/\s+/g, ' ').trim();
+        return h('details', { class: 'hist hmore support', open: opened.has('*support'),
+          ontoggle: (e) => { if (e.target.open) opened.add('*support'); else opened.delete('*support'); } },
+          h('summary', {}, h('span', { class: 'hrole muted', title: 'Case notes, emails and chats that FIRST\'s support team copies into VMS' },
+            'FIRST support history (' + support.length + ')')),
+          support.map((r, i) => h('details', { class: 'snote', open: opened.has('*s' + i),
+            ontoggle: (e) => { if (e.target.open) opened.add('*s' + i); else opened.delete('*s' + i); } },
+            h('summary', {}, h('span', { class: 'sdate' }, noteDate(r.postedDate)), h('span', { class: 'stext' }, flat(r.note))),
+            h('div', { class: 'sfull' }, r.note.trim()))));
+      }),
       h('div', { style: 'margin-top:18px' },
         h('a', { href: profileUrl(person), target: '_blank' }, 'Open full profile in VMS')));
   }
@@ -2575,7 +3004,7 @@
     const stopFill = (e) => { if (e) e.stopPropagation(); state.fill = null; renderMain(); };
 
     const nameCell = (en) => [
-      h('a', { class: 'pname', href: '#', title: 'Show details', onclick: (e) => { e.preventDefault(); openDetail(en.id); } }, showName(en)),
+      h('a', { class: 'pname', href: '#', title: 'Show details', 'data-pid': en.id, onclick: (e) => { e.preventDefault(); openDetail(en.id, e.currentTarget); } }, showName(en)),
       noteMark(en.id),
       en.back ? h('span', { class: 'inf', title: 'Did this role here last season' }, '↺') : null,
       en.untrained ? h('span', { class: 'bd', title: 'Required training not complete' }, '⚠') : null,
