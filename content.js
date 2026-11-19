@@ -2515,9 +2515,17 @@
     return '/VMS/Volunteers/VolunteerDetails.aspx?ID=' + evId + '&RoleID=' + (r.roleId || 0)
       + '&IsCustom=' + (r.custom ? 'True' : 'False') + '&PeopleID=' + person.id;
   }
+  // A plain click opens the details pane. The link itself is their VMS profile, so a middle-click, Ctrl/Cmd-click
+  // or "Open link in new tab" opens that in a new tab.
+  const paneClick = (id) => (e) => {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    openDetail(id, e.currentTarget);
+  };
+  const profileHref = (id) => { const p = state.people.find((x) => x.id === id); return p ? profileUrl(p) : '#'; };
   const nameLink = (person, text) => h('a', {
-    class: 'pname', href: '#', title: 'Show details', 'data-pid': person.id,
-    onclick: (e) => { e.preventDefault(); openDetail(person.id, e.currentTarget); },
+    class: 'pname', href: profileUrl(person), title: 'Show details (middle-click for their VMS profile)', 'data-pid': person.id,
+    onclick: paneClick(person.id),
   }, text || person.first + ' ' + person.last);
 
   function openDetail(id, from) {
@@ -3067,7 +3075,7 @@
     const stopFill = (e) => { if (e) e.stopPropagation(); state.fill = null; renderMain(); };
 
     const nameCell = (en) => [
-      h('a', { class: 'pname', href: '#', title: 'Show details', 'data-pid': en.id, onclick: (e) => { e.preventDefault(); openDetail(en.id, e.currentTarget); } }, showName(en)),
+      h('a', { class: 'pname', href: profileHref(en.id), title: 'Show details (middle-click for their VMS profile)', 'data-pid': en.id, onclick: paneClick(en.id) }, showName(en)),
       noteMark(en.id),
       en.back ? h('span', { class: 'inf', title: 'Did this role here last season' }, '↺') : null,
       en.untrained ? h('span', { class: 'bd', title: 'Required training not complete' }, '⚠') : null,
