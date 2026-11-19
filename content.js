@@ -712,7 +712,7 @@
       const sets = evs.map((e) => e.assign.filter((a) => !a.admin).map((a) => a.role).sort().join('|')).filter(Boolean);
       if (new Set(sets).size > 1) p.flags.push('rolediff');
       if (evs.some((e) => owedTraining(e).length)) p.flags.push('training');
-      if ((p.raw.SignedConsentReleaseStatus || '') === 'Unsigned') p.flags.push('consent');
+      if (consentOf(p) === 'unsigned') p.flags.push('consent');
       if (evs.some((e) => e.lastSeason)) p.flags.push('returning');
     });
     return [...people.values()].sort((a, b) => a.last.localeCompare(b.last) || a.first.localeCompare(b.first));
@@ -2228,7 +2228,8 @@
     loaded.forEach(({ ev }) => head.push(evShort(ev) + ' role', evShort(ev) + ' shift', evShort(ev) + ' notified'));
     head.push('Applied for', 'Flags');
     const rows = shown.map((p) => {
-      const row = [p.last, p.first, p.email, p.raw.PhoneNumber || '', p.age != null ? String(p.age) : '', p.raw.ShirtSize || '', p.raw.PersonalPronounText || ''];
+      const pr = profiles.get(p.id) || {};
+      const row = [p.last, p.first, p.email, p.raw.PhoneNumber || '', p.age != null ? String(p.age) : '', pr.shirt || '', pr.pronouns || ''];
       loaded.forEach(({ ev }) => {
         const assign = p.ev[ev.id] ? p.ev[ev.id].assign : [];
         const shifts = assign.flatMap((a) => a.shifts);
@@ -2317,6 +2318,8 @@
   // first the quiet roles skipped at load (almost always empty), then the training and last-season reports.
   let working = false;
   let notesShown = true, notesSince = 0;
+  let profilesChanged = false, profilesSince = 0;
+  const profileFailed = new Set();
   async function background() {
     if (working) return;
     working = true;
@@ -2378,6 +2381,27 @@
             notesSince = 0;
             const typing = shadow.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(shadow.activeElement.tagName);
             if (state.tab === 'staff' && !typing && !state.staffApplying) { notesShown = true; renderMain(); }
+          }
+          continue;
+        }
+        // Then their profiles: consent first (the role lists can't be trusted for it), then the rest for shirt sizes,
+        // pronouns and languages in the roster.
+        const unread = state.people.filter((p) => !profiles.has(p.id) && !profileFailed.has(p.id));
+        if (unread.length) {
+          const next = unread.find((p) => consentOf(p) === 'checking') || unread[0];
+          state.note = 'Reading volunteer profiles (' + unread.length + ' left)…'; renderHeader();
+          const before = consentOf(next);
+          try { await readProfile(next); } catch (e) { if (Date.now() < blockedUntil) throw e; profileFailed.add(next.id); }
+          if (consentOf(next) !== before) profilesChanged = true;
+          // Redraw now and then so corrected consent flags show, but not while someone is typing.
+          if (profilesChanged && (unread.length === 1 || ++profilesSince >= 15)) {
+            profilesSince = 0;
+            const typing = shadow.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(shadow.activeElement.tagName);
+            if (!typing && !state.staffApplying && !state.drafting) {
+              profilesChanged = false;
+              state.people = buildPeople(state.loaded);
+              render();
+            }
           }
           continue;
         }
@@ -2521,33 +2545,70 @@
     want('history', svc('GetVolunteerAssignments', { peopleID: id, isCurrentSeason: false }, true));
     want('others', svc('GetVolunteerApplications', { peopleID: id, eventID: evId, excludeEvent: true }, true));
     want('comments', svc('GetVCComments', { peopleID: id }, true).then((rows) => { vcNotes.set(id, coordinatorNotes(rows)); return rows; }));
-    want('profile', fetchDoc(profileUrl(person)).then(({ doc }) => {
-      const pick = (name) => txt(doc.getElementById('MainContent_' + name));
-      // Split an element's text into lines wherever the page breaks it visually.
-      const lines = (name) => {
-        const out = [];
-        let cur = '';
-        const flush = () => { const t = cur.replace(/\s+/g, ' ').trim(); if (t) out.push(t); cur = ''; };
-        const walk = (node) => {
-          if (node.nodeType === 3) { cur += node.nodeValue; return; }
-          if (node.nodeType !== 1) return;
-          const block = /^(BR|LI|DIV|P|TR|UL|OL|TABLE)$/.test(node.tagName);
-          if (block) flush();
-          node.childNodes.forEach(walk);
-          if (block) flush();
-        };
-        const el = doc.getElementById('MainContent_' + name);
-        if (el) { walk(el); flush(); }
-        return out;
-      };
-      return {
-        dietary: pick('DietaryRestrictionsLabel'), limits: pick('PhysicalLimitationsLabel'),
-        emergency: [pick('EmergencyContactLabel'), pick('EmergencyContactNumberLabel')].filter(Boolean).join(' · '),
-        skills: pick('skillsLabel'), teams: lines('team_affiliationLabel'), orgs: pick('person_affiliation'),
-        courses: lines('CourseListDiv'),
-      };
-    }));
+    want('profile', profiles.has(id) ? Promise.resolve(profiles.get(id)) : readProfile(person));
   }
+  // A volunteer's VMS profile page: what VMS shows about them. The role lists VMS+ loads from carry some of the same
+  // details, but they're often blank or out of date there (consent most of all), so these come from the profile.
+  const profiles = new Map();
+  const PROFILE_LABELS = ['Legal First Name', 'Phone', 'Email', 'Address', 'Demographics', 'Age', 'Service', 'Gender', 'Shirt', 'Pronouns',
+    'Languages Spoken', 'Self-Reported Accommodations', 'Dietary Restrictions', 'Emergency Contact', 'Contact Name', 'Phone Number', 'Alumni',
+    'Skills/Expertise in', 'Team Affiliation', 'Affiliations', 'Employer', 'Share With Employer', 'FIRST Youth Protection Policy',
+    'Local Youth Protection Requirements', 'FIRST Overall Pennsylvania YPP Clearance Status', 'FIRST Overall California YPP Clearance Status',
+    'Consent & Release'];
+  function parseProfile(doc) {
+    const pick = (name) => txt(doc.getElementById('MainContent_' + name));
+    // Split an element's text into lines wherever the page breaks it visually.
+    const lines = (name) => {
+      const out = [];
+      let cur = '';
+      const flush = () => { const t = cur.replace(/\s+/g, ' ').trim(); if (t) out.push(t); cur = ''; };
+      const walk = (node) => {
+        if (node.nodeType === 3) { cur += node.nodeValue; return; }
+        if (node.nodeType !== 1) return;
+        const block = /^(BR|LI|DIV|P|TR|UL|OL|TABLE)$/.test(node.tagName);
+        if (block) flush();
+        node.childNodes.forEach(walk);
+        if (block) flush();
+      };
+      const el = doc.getElementById('MainContent_' + name);
+      if (el) { walk(el); flush(); }
+      return out;
+    };
+    // The top of the page is "Label: value" pairs; status icons say what they mean in their tooltip.
+    const html = doc.body ? doc.body.innerHTML : '';
+    const from = html.search(/Legal First Name/), to = html.search(/MainContent_CoursesSectionDiv/);
+    const text = (from >= 0 ? html.slice(from, to > from ? to : from + 20000) : '')
+      .replace(/<span[^>]*title=['"]([^'"]*)['"][^>]*>\s*<\/span>/g, ' $1 ').replace(/<[^>]+>/g, ' ')
+      .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/&#39;/g, "'").replace(/\s+/g, ' ');
+    const field = {};
+    const re = new RegExp('(' + PROFILE_LABELS.map((l) => l.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')).sort((x, y) => y.length - x.length).join('|') + '):', 'g');
+    const marks = [];
+    let m;
+    while ((m = re.exec(text))) marks.push([m[1], m.index, re.lastIndex]);
+    marks.forEach(([label, , end], i) => { field[label] = text.slice(end, i + 1 < marks.length ? marks[i + 1][1] : text.length).trim(); });
+    const value = (label) => { const t = (field[label] || '').trim(); return /^-?$/.test(t) ? '' : t; };
+    return {
+      dietary: pick('DietaryRestrictionsLabel'), limits: pick('PhysicalLimitationsLabel'),
+      emergency: [pick('EmergencyContactLabel'), pick('EmergencyContactNumberLabel')].filter(Boolean).join(' · '),
+      skills: pick('skillsLabel'), teams: lines('team_affiliationLabel'), orgs: pick('person_affiliation'),
+      courses: lines('CourseListDiv'),
+      consent: value('Consent & Release'), shirt: value('Shirt'), pronouns: value('Pronouns'), languages: value('Languages Spoken'),
+      alumni: /^yes/i.test(value('Alumni')), employer: value('Employer'),
+    };
+  }
+  async function readProfile(person) {
+    const { doc } = await fetchDoc(profileUrl(person));
+    const pr = parseProfile(doc);
+    profiles.set(person.id, pr);
+    return pr;
+  }
+  // Whether they've signed this season's Consent and Release form: the profile's answer when it has been read.
+  // The role lists often still say "Unsigned" after someone has signed, so that alone is never treated as unsigned.
+  const consentOf = (p) => {
+    const pr = profiles.get(p.id);
+    if (pr && pr.consent) return /^signed/i.test(pr.consent) ? 'signed' : 'unsigned';
+    return /^signed/i.test(p.raw.SignedConsentReleaseStatus || '') ? 'signed' : 'checking';
+  };
   // The pane slides in and out a little (140ms); with reduced motion it just appears and disappears.
   const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Previous / next person in the list the pane was opened from (also the ← and → keys).
@@ -2763,9 +2824,10 @@
     // About and their VMS profile together as one "Profile" section; left out entirely when there's nothing in it.
     // The page-based details (teams, skills, courses…) arrive a moment later than the rest.
     const profilePairs = (pr) => [
-      ['Years with FIRST', v.InFIRST ? String(v.InFIRST) : null],
-      ['FIRST alumni', v.FlagIsAlumni ? 'Yes' : null],
-      ['Organization', blank(v.Organization) ? null : v.Organization],
+      // The same number VMS shows in its role pages' "FIRST Years of Service" column.
+      ['FIRST years of service', v.InFIRST ? String(v.InFIRST) : null],
+      ['FIRST alumni', pr && pr.alumni ? 'Yes' : null],
+      ['Employer', !pr || blank(pr.employer) ? null : pr.employer],
       ['Affiliations', !pr || blank(pr.orgs) || /no affiliation/i.test(pr.orgs) ? null : pr.orgs],
       ['Team affiliations', !pr ? null : (() => {
         const teams = pr.teams.filter((n) => !blank(n) && !/no affiliation/i.test(n));
@@ -2773,9 +2835,9 @@
         return teams.length ? teams.map((n) => h('div', {}, n.replace(/^\s*(FRC|FTC|FLL)\s+Team\s*#\s*/i, (m, prog) => prog.toUpperCase() + ' '))) : null;
       })()],
       ['Skills', !pr || blank(pr.skills) ? null : pr.skills],
-      ['Shirt size', blank(v.ShirtSize) ? null : v.ShirtSize],
+      ['Shirt size', !pr || blank(pr.shirt) ? null : pr.shirt],
       ['Dietary', !pr || blank(pr.dietary) ? null : pr.dietary],
-      ['Accommodations', !blank(v.PhysicalLimitations) ? v.PhysicalLimitations : !pr || blank(pr.limits) ? null : pr.limits],
+      ['Accommodations', !pr || blank(pr.limits) ? null : pr.limits],
       ['Emergency contact', pr ? pr.emergency : null],
       ['Training completed', !pr ? null : (() => {
         // A finished training path (Mentor Ready, Volunteer Ready) is listed twice: the path itself and a
@@ -2837,18 +2899,19 @@
         ['Phone', /^\d{10}$/.test(v.PhoneNumber || '') ? v.PhoneNumber.replace(/(\d{3})(\d{3})(\d{4})/, '($1) $2-$3') : v.PhoneNumber],
         ['Location', [v.City, v.State].filter(Boolean).join(', ')],
         ['Age', person.age != null ? person.age + (person.age < 18 ? ' (minor)' : '') : null],
-        ['Pronouns', blank(v.PersonalPronounText) ? null : v.PersonalPronounText],
-        ['Languages', blank(v.LanguagesSpoken) ? null : v.LanguagesSpoken],
+        ['Pronouns', x.profile && !blank(x.profile.pronouns) ? x.profile.pronouns : null],
+        ['Languages', x.profile && !blank(x.profile.languages) ? x.profile.languages : null],
       ]),
       h('h3', {}, 'Clearance and paperwork'),
       kv([
         ['Youth protection', clearanceChip(person.clearance || (person.cleared ? 'Meets requirements' : 'Not cleared'), person.cleared)],
         ['Pennsylvania', blank(v.YPPStatusPA) || /no known roles/i.test(v.YPPStatusPA) ? null : clearanceChip(v.YPPStatusPA)],
         ['California', blank(v.YPPStatusCA) || /no known roles/i.test(v.YPPStatusCA) ? null : clearanceChip(v.YPPStatusCA)],
-        ['Consent and release', blank(v.SignedConsentReleaseStatus) ? null
-          : /^signed/i.test(v.SignedConsentReleaseStatus) ? chip('ok', 'Signed', v.SignedConsentReleaseStatus)
-            : chip('warn', /unsigned|not signed/i.test(v.SignedConsentReleaseStatus) ? 'Not signed' : v.SignedConsentReleaseStatus, v.SignedConsentReleaseStatus)],
-        ['Role training', v.IsCertified ? chip('ok', 'Certified', 'Certified for a role they applied to') : null],
+        ['Consent and release', (() => {
+          const c = consentOf(person);
+          return c === 'signed' ? chip('ok', 'Signed', 'From their VMS profile') : c === 'unsigned' ? chip('warn', 'Not signed', 'From their VMS profile')
+            : h('span', { class: 'sub' }, h('span', { class: 'spin', 'aria-hidden': 'true' }), 'Checking their profile…');
+        })()],
       ]),
       profileSection(),
       h('h3', {}, 'All assignments this season'),
