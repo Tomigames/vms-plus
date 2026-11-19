@@ -44,6 +44,16 @@ The People tab lists everyone across the loaded events, with what they're doing 
 - **Reminder drafts.** One click opens an email draft for each person who still owes clearance, training or the consent form. You review and send them yourself.
 - **Volunteer details.** Click a name anywhere for a side pane: what they're doing at your events first, then clearance and paperwork, their profile, this season's assignments, past seasons grouped by role, and coordinator comments (FIRST support emails are kept separate and folded away). Step through a list with ‹ › or the arrow keys.
 
+### Find any volunteer
+
+VMS's own volunteer search only knows people who have been assigned to an event at least once, so applicants who have never been assigned don't show up there at all. VMS+'s **Find volunteers** tab searches everyone who applied to or is assigned at any of your events, whether you've loaded them or not.
+
+- **Forgiving search.** Type part of a name or email, in any order: `jane doe`, `doe jane`, `jan`, `@gmail`. Nicknames and legal names both work.
+- **Where they applied.** Each result lists the events and roles they applied for, and which they're assigned to. Click a name to open their VMS profile.
+- **Search all of VMS.** For people who never applied to your events, one click runs VMS's own search the way it works best (a full first and last name, every way a longer name could split, or a full email). If VMS times out, it says so instead of showing an empty list.
+
+The first time you open it, VMS+ reads each event's application and assignment lists in the background, one at a time. Results fill in as each list arrives.
+
 ### Bulk actions
 
 - **Shift times:** set one shift time per event, or per role, and apply it to every assigned shift. This replaces VMS's 6am–10pm default.

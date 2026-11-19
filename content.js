@@ -252,8 +252,37 @@
   // Report 27, Volunteer Application Status: one row per person and role they applied for.
   // It says who applied for what, with which preference, and whether that application has been assigned.
   const personKey = (email, last, first) => [email, last, first].map((t) => (t || '').toLowerCase().trim()).join('|');
+  // Everyone who applied to each event, kept for the Find tab: filled when an event loads, and by the Find tab for
+  // events that aren't loaded. Memory only, like all volunteer details.
+  const appIndex = new Map();
+  async function appReport(evId) {
+    const rows = await reportRows(evId, 27, ['Email', 'Date Applied', 'Role', 'Assignment Status']);
+    appIndex.set(evId, {
+      at: Date.now(),
+      rows: rows.map((r) => ({
+        pref: r['Preferred First Name'] || '', legal: r['Legal First Name'] || '', last: r['Last Name'] || '',
+        email: (r.Email || '').toLowerCase(), city: r.City || '', st: r['State/Province'] || '', age: r.Age || '',
+        role: cleanRole(r.Role || ''), status: r['Assignment Status'] || '', ypp: r['FIRST Youth Protection Policy'] || '',
+      })),
+    });
+    return rows;
+  }
+  // Report 17, Attendance & Event Planning: one row per assigned person, role and day. It also lists people placed in a
+  // role without applying for it (the event's own coordinators, for one), whom the application report leaves out.
+  const asgIndex = new Map();
+  async function asgReport(evId) {
+    const rows = await reportRows(evId, 17, ['Email', 'Role', 'Start Time', 'Shadow/Trainee']);
+    asgIndex.set(evId, {
+      at: Date.now(),
+      rows: rows.map((r) => ({
+        pref: r['Preferred First Name'] || '', legal: r['Legal First Name'] || '', last: r['Last Name'] || '',
+        email: (r.Email || '').toLowerCase(), city: '', st: '', age: '',
+        role: cleanRole(r.Role || ''), status: 'Assigned', ypp: r['FIRST Youth Protection Policy'] || '',
+      })),
+    });
+  }
   async function loadApplications(evId) {
-    return (await reportRows(evId, 27, ['Email', 'Date Applied', 'Role', 'Assignment Status'])).map((r) => ({
+    return (await appReport(evId)).map((r) => ({
       email: r.Email.toLowerCase(),
       key: personKey(r.Email, r['Last Name'], r['Legal First Name']),
       role: cleanRole(r.Role || '').toLowerCase(),
@@ -841,6 +870,11 @@
       .prow .pflags { grid-column: 1; grid-row: 2; }
     }
     .pname { font-weight: 600; cursor: pointer; }
+    .lnk.pname { font-size: inherit; margin: 0; text-align: left; }
+    input.findq { flex: 1 1 320px; max-width: 560px; }
+    .findstat { margin-bottom: 8px; }
+    .frow { display: grid; grid-template-columns: minmax(200px, 340px) minmax(0, 1fr); gap: 4px 14px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+    @media (max-width: 760px) { .frow { grid-template-columns: minmax(0, 1fr); } }
     .vcnote { display: inline-block; position: relative; width: 15px; height: 11px; margin: 0 2px 0 7px; border-radius: 3px; background: var(--accent); vertical-align: -1px; cursor: help; }
     .vcnote::after { content: ''; position: absolute; left: 3px; bottom: -4px; border-style: solid; border-width: 4px 4px 0 0; border-color: var(--accent) transparent transparent transparent; }
     input.otheremail { width: 280px; max-width: 100%; margin-left: 4px; }
@@ -1236,7 +1270,7 @@
     parked: saved.staged, restoreNote: '', fresh: true,
     times: readTimes(), picks: new Map(), confirming: false, applying: false, applyResult: null,
     events: [], selected: new Set(), loaded: [], people: [],
-    tab: ['staff', 'roles', 'people', 'times', 'notify', 'message'].includes(saved.tab) ? saved.tab : 'staff', busy: false,
+    tab: ['staff', 'roles', 'people', 'find', 'times', 'notify', 'message'].includes(saved.tab) ? saved.tab : 'staff', busy: false,
     staffRole: saved.staffRole || '', staged: [], showAssigned: saved.showAssigned, poolSearch: '', staffConfirm: false, staffApplying: false, staffResult: null,
     detail: null,
     toggleKey: '', toggling: false, inviteLink: null, hideAsk: null, hiding: false,
@@ -1327,7 +1361,7 @@
     if (!keep) headerEl = h('header');
     mainEl = h('main');
     const tabs = h('div', { class: 'tabs' },
-      [['staff', staffLabel()], ['roles', 'Roles'], ['people', 'People (' + state.people.length + ')'],
+      [['staff', staffLabel()], ['roles', 'Roles'], ['people', 'People (' + state.people.length + ')'], ['find', 'Find volunteers'],
         ['times', 'Shift times'], ['notify', 'Notify (' + pendingNotifications().length + ')'], ['message', 'Message']].map(([t, label]) => h('button', {
         class: state.tab === t ? 'on' : '',
         onclick: () => { state.tab = t; state.confirming = false; state.staffConfirm = false; state.notify.confirming = false; state.msg.confirming = false; state.toggleKey = ''; state.toTop = true; render(); },
@@ -1500,12 +1534,13 @@
     if (failedReads.length) mainEl.append(h('div', { class: 'msg err' },
       'VMS could not send the applicant list for ' + failedReads.join(', ')
       + ', even after retrying. Those roles show no applicants here; assigned volunteers are complete. Press Refresh to try again.'));
-    if (!state.loaded.length) {
+    // Find works across all your events, loaded or not.
+    if (!state.loaded.length && state.tab !== 'find') {
       mainEl.append(h('div', { class: 'msg' }, state.busy ? 'Working…'
         : 'Tick the events to view together, then press Load. Loading only reads from VMS. Nothing changes in VMS until you confirm it.'));
       return;
     }
-    const views = { staff: staffView, roles: rolesView, people: peopleView, times: timesView, notify: notifyView, message: messageView };
+    const views = { staff: staffView, roles: rolesView, people: peopleView, find: findView, times: timesView, notify: notifyView, message: messageView };
     mainEl.append(views[state.tab]());
     mainEl.scrollTop = top;
     if (focusKey) {
@@ -2056,6 +2091,266 @@
               h('div', { class: 'sub' }, 'Covers ' + kinds.map((k) => REMIND_NAME[k]).join(', ') + (when ? ' · drafted ' + fmtDay(when) : '')),
             ];
           })()) : null)))));
+  }
+
+  // ----- Find tab -----
+  // VMS's own volunteer search only knows people who have been assigned to an event at least once: applicants who
+  // have never been assigned can't be found there at all. So this searches everyone who applied to or is assigned at
+  // any of your events, from two reports per event: applications, then assignments (read once per session, one at a
+  // time, results filling in as they arrive). VMS's own search is offered below, for anyone else.
+  const find = { q: '', reading: false, failed: new Set(), stopped: '', vms: null };
+  let findResEl = null;
+  const findEvents = () => shownEvents();
+  const fold = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const findWords = (q) => fold(q).split(/[\s,;]+/).filter(Boolean);
+
+  // Every word typed must appear somewhere in their names or email, in any order and as part of a word.
+  function findMatches(words) {
+    const people = new Map();
+    findEvents().forEach((ev) => {
+      // Applications first; an assignment adds a role only when it isn't one of their applications already.
+      [appIndex.get(ev.id), asgIndex.get(ev.id)].forEach((entry) => {
+        if (!entry) return;
+        entry.rows.forEach((r) => {
+          const hay = fold([r.pref, r.legal, r.last, r.email].join(' '));
+          if (!words.every((w) => hay.includes(w))) return;
+          const key = r.email || fold(r.legal + ' ' + r.last);
+          if (!people.has(key)) people.set(key, { ...r, apps: [] });
+          const p = people.get(key);
+          const same = p.apps.find((a) => a.ev === ev && a.role.toLowerCase() === r.role.toLowerCase());
+          if (same) { if (/^applied$/i.test(same.status) && r.status === 'Assigned') same.status = 'Assigned'; return; }
+          p.apps.push({ ev, role: r.role, status: r.status });
+          ['city', 'st', 'age'].forEach((k) => { if (!p[k] && r[k]) p[k] = r[k]; });
+        });
+      });
+    });
+    // Whole-name matches first ("Doe" before "Doering"), then by last name.
+    const whole = (p) => { const names = fold([p.pref, p.legal, p.last].join(' ')).split(/[\s-]+/); return words.every((w) => names.includes(w)) ? 0 : 1; };
+    const first = (p) => fold(p.pref || p.legal);
+    return [...people.values()].sort((a, b) => whole(a) - whole(b) || fold(a.last).localeCompare(fold(b.last)) || first(a).localeCompare(first(b)));
+  }
+
+  // Every event's applications come first, so applicants show up soonest; then every event's assignments.
+  const findPending = (j) => !(j.kind === 'app' ? appIndex : asgIndex).has(j.ev.id) && !find.failed.has(j.kind + ':' + j.ev.id);
+  const findJobs = () => ['app', 'asg'].flatMap((kind) => findEvents().map((ev) => ({ kind, ev }))).filter(findPending);
+  async function readAllApplicants() {
+    if (find.reading) return;
+    find.reading = true; find.stopped = '';
+    refreshFind();
+    try {
+      for (;;) {
+        const job = findJobs()[0];
+        if (!job) break;
+        // A details pane someone just opened, or a Load, goes first.
+        while (paneBusy > 0 || state.busy) await pause(300);
+        if (!findPending(job)) continue;
+        try { await (job.kind === 'app' ? appReport : asgReport)(job.ev.id); } catch (e) {
+          if (Date.now() < blockedUntil) { find.stopped = e.message; break; }
+          find.failed.add(job.kind + ':' + job.ev.id);
+        }
+        refreshFind();
+      }
+    } finally { find.reading = false; refreshFind(); }
+  }
+  // Redraw the results without touching the search box, so typing is never interrupted.
+  function refreshFind() {
+    if (state.tab !== 'find' || !findResEl || !findResEl.isConnected) return;
+    findResEl.replaceChildren(...findBody());
+  }
+
+  function findView() {
+    if (findJobs().length && !find.stopped) setTimeout(readAllApplicants, 0);
+    findResEl = h('div', {}, findBody());
+    return h('div', {},
+      h('div', { class: 'bar' },
+        h('input', { type: 'search', class: 'findq', 'data-fk': 'findq', value: find.q, placeholder: 'Name or email, any order: jane doe, doe jane, jan, @gmail',
+          oninput: (e) => { find.q = e.target.value; refreshFind(); } })),
+      findResEl);
+  }
+
+  function findBody() {
+    const evs = findEvents();
+    const total = evs.length * 2;
+    const done = evs.filter((ev) => appIndex.has(ev.id)).length + evs.filter((ev) => asgIndex.has(ev.id)).length;
+    const failed = evs.filter((ev) => find.failed.has('app:' + ev.id) || find.failed.has('asg:' + ev.id));
+    const out = [];
+    out.push(h('div', { class: 'sub findstat' },
+      !state.events.length ? (state.busy ? 'Finding your events…' : 'No events to search.')
+        : find.reading ? [h('span', { class: 'spin', 'aria-hidden': 'true' }), 'Reading who applied to and is assigned at your events: ' + done + ' of ' + total + ' lists done. Results fill in as each one arrives.']
+          : 'Searching everyone who applied to or is assigned at your ' + plural(evs.length, 'event') + '.',
+      state.hidePast && state.events.some(isPast) ? ' Past events are left out; choose Show past in the event list to search them too.' : '',
+      !find.reading && done ? [' ', h('button', { class: 'lnk', title: 'Read the lists again, to pick up new applications and assignments',
+        onclick: () => { appIndex.clear(); asgIndex.clear(); find.failed.clear(); readAllApplicants(); } }, 'Read again')] : null));
+    if (find.stopped) out.push(h('div', { class: 'msg err' }, find.stopped, ' ',
+      h('button', { class: 'lnk', onclick: () => { find.stopped = ''; readAllApplicants(); } }, 'Try again')));
+    if (failed.length && !find.reading) out.push(h('div', { class: 'msg err' },
+      'VMS couldn’t send everyone who applied to or is assigned at ' + failed.map((ev) => ev.name).join(', ') + ', so some people there may be missing. ',
+      h('button', { class: 'lnk', onclick: () => { find.failed.clear(); readAllApplicants(); } }, 'Try again')));
+
+    const words = findWords(find.q);
+    if (!words.length) {
+      out.push(h('div', { class: 'msg' }, 'Type part of a name or email. This finds anyone who applied to or is assigned at your events, including people who have never been assigned anywhere. VMS’s own volunteer search can’t find those.'));
+      return out;
+    }
+    const found = findMatches(words);
+    const SHOW = 100;
+    out.push(h('div', { class: 'muted', style: 'margin: 8px 0 4px' },
+      (found.length === 1 ? '1 match' : found.length + ' matches') + (find.reading ? ' so far' : '')
+      + (found.length > SHOW ? ', showing the first ' + SHOW + '. Type more to narrow it down.' : '')));
+    found.slice(0, SHOW).forEach((p) => out.push(foundRow(p)));
+    out.push(vmsSection());
+    return out;
+  }
+
+  const statusTone = (s) => (/^assigned/i.test(s) ? 'ok' : /tentative/i.test(s) ? 'info' : 'plain');
+  function foundRow(p) {
+    const name = (p.pref || p.legal) + ' ' + p.last;
+    // Someone in the loaded events gets the details pane, like everywhere else.
+    const here = p.email ? state.people.find((x) => (x.email || '').toLowerCase() === p.email) : null;
+    const byEvent = new Map();
+    p.apps.forEach((a) => { if (!byEvent.has(a.ev)) byEvent.set(a.ev, []); byEvent.get(a.ev).push(a); });
+    return h('div', { class: 'frow' },
+      h('div', {},
+        here ? nameLink(here, name)
+          : h('button', { class: 'lnk pname', title: 'Open their VMS profile in a new tab', onclick: (e) => openFoundProfile(p, e.currentTarget) }, name),
+        p.legal && p.pref && fold(p.legal) !== fold(p.pref) ? h('span', { class: 'sub' }, ' (legal name ' + p.legal + ')') : null,
+        h('div', { class: 'sub' }, [p.email, p.age ? 'age ' + p.age : '', [p.city, p.st].filter(Boolean).join(', ')].filter(Boolean).join(' · '))),
+      h('div', {}, [...byEvent].map(([ev, apps]) => h('div', { class: 'line' },
+        h('a', { href: '/VMS/Events/EventDetails.aspx?ID=' + ev.id, target: '_blank', title: 'Open the event in VMS' }, evLabel(ev)), ' ',
+        apps.map((a) => chip(statusTone(a.status), a.role + (a.status && !/^applied$/i.test(a.status) ? ' · ' + a.status : ''), a.status))))));
+  }
+
+  // The application report has no ID numbers, so their profile link comes from a role list they're on.
+  const foundUrls = new Map(), eventRoles = new Map();
+  async function profileUrlFor(p) {
+    if (foundUrls.has(p.email)) return foundUrls.get(p.email);
+    for (const a of p.apps) {
+      if (!eventRoles.has(a.ev.id)) eventRoles.set(a.ev.id, await svc('GetRoles', { eventID: a.ev.id, roleType: 0 }, true));
+      const role = (eventRoles.get(a.ev.id) || []).find((r) => cleanRole(r.Name).toLowerCase() === a.role.toLowerCase());
+      if (!role) continue;
+      const lists = [
+        ['GetAssignedVolunteers', { eventID: a.ev.id, roleID: role.ID, isCustom: !!role.IsCustom, viewType: 'Event', day: 0 }],
+        ['GetUnassignedVolunteers', { eventID: a.ev.id, roleID: role.ID, tab: 'Applicants', isCustom: !!role.IsCustom }],
+        ['GetUnassignedVolunteers', { eventID: a.ev.id, roleID: role.ID, tab: 'Hidden', isCustom: !!role.IsCustom }],
+      ];
+      if (/^applied/i.test(a.status)) lists.push(lists.shift());
+      for (const [method, params] of lists) {
+        const rows = await svc(method, params, true);
+        const v = Array.isArray(rows) ? rows.find((x) => (x.Email || '').toLowerCase() === p.email) : null;
+        if (v) {
+          const url = '/VMS/Volunteers/VolunteerDetails.aspx?ID=' + a.ev.id + '&RoleID=' + role.ID
+            + '&IsCustom=' + (role.IsCustom ? 'True' : 'False') + '&PeopleID=' + v.PeopleID;
+          foundUrls.set(p.email, url);
+          return url;
+        }
+      }
+    }
+    throw new Error('VMS didn’t list them under the roles they applied for');
+  }
+  async function openFoundProfile(p, btn) {
+    // Open the tab now, while the click still counts, and send it to the profile once the link is known.
+    const tab = window.open('about:blank', '_blank');
+    btn.disabled = true;
+    try {
+      const url = await profileUrlFor(p);
+      if (tab) tab.location.href = url; else window.open(url, '_blank');
+    } catch (e) {
+      if (tab) tab.close();
+      toast('Couldn’t open their profile: ' + e.message);
+    }
+    btn.disabled = false;
+  }
+
+  // VMS's own search, used the way it works best: a first and last name together (trying each way a longer name
+  // could split, since first names can be two words), or a full email. It only matches whole names.
+  const VMS_SLOW = 'VMS took too long and gave up. That happens when a search is broad, like a single or common name. Add the first name, or search by full email.';
+  async function vmsSearchOnce(fields) {
+    const params = { pageNum: 0, pageSize: 100, sortField: 'Name', sortOrder: 'asc', firstName: '', lastName: '', email: '', searchPhrase: '', isWildCard: false, ...fields };
+    const qs = Object.entries(params).map(([k, v]) => k + '=' + encodeURIComponent(typeof v === 'string' ? JSON.stringify(v) : v)).join('&');
+    // No retries: a search VMS couldn't finish won't finish the second time either, and each try holds VMS up for a minute.
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 75000);
+    let res;
+    await svcSlot(true);
+    try {
+      res = await vfetch(SVC + 'SearchVolunteers?' + qs, {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' }, credentials: 'same-origin', signal: ctl.signal,
+      });
+    } catch (e) {
+      throw e && e.name === 'AbortError' ? new Error(VMS_SLOW) : e;
+    } finally { clearTimeout(timer); svcFree(); }
+    if ([500, 502, 503, 504].includes(res.status)) throw new Error(VMS_SLOW);
+    if (!res.ok) throw new Error('VMS search failed (HTTP ' + res.status + ')');
+    let d;
+    try { d = (await res.json()).d; } catch (e) { throw new Error('VMS session expired. Sign in again and reload.'); }
+    if (d == null) throw new Error('VMS session expired. Sign in again and reload.');
+    const r = typeof d === 'string' ? JSON.parse(d) : d;
+    return Array.isArray(r.Items) ? r.Items : [];
+  }
+  async function searchVms(q, single) {
+    if (!single && !/@/.test(q) && !q.includes(',') && q.split(/\s+/).filter(Boolean).length < 2) { find.vms = { q, ask: true }; refreshFind(); return; }
+    find.vms = { q, running: true };
+    refreshFind();
+    const r = await vmsLookup(q);
+    if (!find.vms || find.vms.q !== q) return;
+    find.vms = { q, ...r };
+    refreshFind();
+  }
+  // Every way of asking VMS for what was typed, merged: { items, error }.
+  async function vmsLookup(q) {
+    const words = q.split(/\s+/).filter(Boolean);
+    const tries = [];
+    if (/@/.test(q)) tries.push({ email: q });
+    else if (q.includes(',')) {
+      const [last, first] = q.split(',').map((t) => t.trim());
+      if (first && last) tries.push({ firstName: first, lastName: last });
+    } else if (words.length >= 2) {
+      for (let i = 1; i < words.length; i++) {
+        tries.push({ firstName: words.slice(0, i).join(' '), lastName: words.slice(i).join(' ') });
+        tries.push({ firstName: words.slice(i).join(' '), lastName: words.slice(0, i).join(' ') });
+      }
+      // VMS's header search ("First Last" as typed) also takes the start of a first name ("jan doe"), which the name
+      // boxes don't. It is just as quick when there is a last name to go on.
+      tries.push({ searchPhrase: words.join(' '), isWildCard: true });
+    }
+    if (!tries.length) tries.push({ lastName: q });
+    const seen = new Map();
+    let failure = '';
+    for (const t of tries) {
+      try { (await vmsSearchOnce(t)).forEach((v) => seen.set(v.PeopleID, v)); } catch (e) {
+        failure = e.message;
+        if (Date.now() < blockedUntil || /session/i.test(failure)) break;
+      }
+    }
+    return { items: [...seen.values()], error: seen.size ? '' : failure };
+  }
+  function vmsSection() {
+    const q = find.q.trim();
+    const v = find.vms && find.vms.q === q ? find.vms : null;
+    const kids = [h('h2', {}, 'Search all of VMS')];
+    if (!v) {
+      kids.push(h('div', { class: 'sub', style: 'margin-bottom: 8px' },
+        'Not here? VMS’s own search covers everyone you can see who has been assigned to an event at least once, including at events that aren’t yours. It needs a whole first and last name, or a full email address.'),
+      h('button', { onclick: () => searchVms(q) }, 'Search VMS for “' + q + '”'));
+    } else if (v.ask) {
+      kids.push(h('div', { class: 'msg' }, 'VMS needs a first and last name, or a full email address. With a single name it checks everyone you can see, which can take a minute and often fails.'),
+        h('button', { onclick: () => searchVms(q, true) }, 'Search VMS for last name “' + q + '” anyway'));
+    } else if (v.running) {
+      kids.push(h('div', { class: 'sub' }, h('span', { class: 'spin', 'aria-hidden': 'true' }), 'Asking VMS…'));
+    } else if (v.error) {
+      kids.push(h('div', { class: 'msg err' }, v.error));
+    } else if (!v.items.length) {
+      kids.push(h('div', { class: 'sub' }, 'VMS found no one. It only knows people who have been assigned to an event at least once, and it often misses partial or misspelled names. Try the whole first and last name, or their full email.'));
+    } else {
+      kids.push(h('div', { class: 'muted', style: 'margin-bottom: 4px' }, v.items.length === 1 ? '1 person' : v.items.length + ' people'));
+      v.items.forEach((x) => kids.push(h('div', { class: 'frow' },
+        h('div', {},
+          h('a', { class: 'pname', href: '/VMS/Volunteers/VolunteerDetails.aspx?PeopleID=' + x.PeopleID, target: '_blank', title: 'Open their VMS profile' },
+            ((x.PreferredName || x.FirstName || '') + ' ' + (x.LastName || '')).trim() || x.Name),
+          h('div', { class: 'sub' }, [x.Email, x.Age != null ? 'age ' + x.Age : '', [x.City, x.State].filter(Boolean).join(', ')].filter(Boolean).join(' · '))),
+        h('div', { class: 'sub' }, x.LatestEventApplied ? 'Last applied to ' + x.LatestEventApplied + (x.LatestProgramApplied ? ' (' + x.LatestProgramApplied + ')' : '') : ''))));
+    }
+    return h('section', { class: 'card', style: 'margin-top: 16px' }, kids);
   }
 
   // ----- Reminders (People tab, when filtered to something a person still owes) -----
