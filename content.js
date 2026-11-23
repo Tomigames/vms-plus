@@ -789,6 +789,8 @@
     .evsearch { width: 100%; box-sizing: border-box; }
     .evclear { margin: 0; white-space: nowrap; align-self: flex-start; }
     .evtools { display: flex; gap: 14px; }
+    .events label.ignored { opacity: .55; }
+    .ignbtn { margin-left: 8px; font-size: 12px; }
     .events label.past { color: var(--muted, #888); }
     .evclear:disabled { color: var(--muted, #888); cursor: default; text-decoration: none; }
     .evbtn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1219,6 +1221,8 @@
       tab: d.tab, staffRole: d.staffRole, showAssigned: !!d.showAssigned, hideZero: !!d.hideZero, hideLast: !!d.hideLast, staffMode: d.staffMode === 'slot' ? 'slot' : 'person', theme: ['light', 'dark'].includes(d.theme) ? d.theme : 'auto', mailer: /^gmail/.test(d.mailer || '') ? 'gmail' : MAILERS.some(([k]) => k === d.mailer) ? d.mailer : '', gmailAccount: typeof d.gmailAccount === 'string' ? d.gmailAccount : '',
       showNeeded: !!d.showNeeded, showOther: !!d.showOther, showAges: d.showAges !== false, hidePast: d.hidePast !== false, showSetup: d.showSetup !== false,
       reminded: d.reminded && typeof d.reminded === 'object' ? d.reminded : {},
+      ignored: Array.isArray(d.ignored) ? d.ignored.map(String) : [],
+      overviewRole: typeof d.overviewRole === 'string' ? d.overviewRole : '',
     };
   })();
   function saveDrafts() {
@@ -1228,6 +1232,7 @@
       selected: state.events.length ? [...state.selected] : saved.selected,
       tab: state.tab, staffRole: state.staffRole, showAssigned: state.showAssigned, hideZero: state.hideZero, hideLast: state.hideLast, staffMode: state.staffMode, theme: state.theme, mailer: state.mailer, gmailAccount: state.gmailAccount, showNeeded: state.showNeeded, showOther: state.showOther, showAges: state.showAges, hidePast: state.hidePast, showSetup: state.showSetup,
       reminded: state.reminded,
+      ignored: [...state.ignored], overviewRole: state.overviewRole,
     };
     try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(data)); } catch (e) { /* progress just won't persist */ }
   }
@@ -1270,7 +1275,8 @@
     parked: saved.staged, restoreNote: '', fresh: true,
     times: readTimes(), picks: new Map(), confirming: false, applying: false, applyResult: null,
     events: [], selected: new Set(), loaded: [], people: [],
-    tab: ['staff', 'roles', 'people', 'find', 'times', 'notify', 'message'].includes(saved.tab) ? saved.tab : 'staff', busy: false,
+    tab: ['overview', 'staff', 'roles', 'people', 'find', 'times', 'notify', 'message'].includes(saved.tab) ? saved.tab : 'staff', busy: false,
+    ignored: new Set(saved.ignored), showIgnored: false, overviewRole: saved.overviewRole,
     staffRole: saved.staffRole || '', staged: [], showAssigned: saved.showAssigned, poolSearch: '', staffConfirm: false, staffApplying: false, staffResult: null,
     detail: null,
     toggleKey: '', toggling: false, inviteLink: null, hideAsk: null, hiding: false,
@@ -1321,7 +1327,29 @@
     const today = new Date(); today.setHours(0, 0, 0, 0);
     return lastDay < today;
   }
-  const shownEvents = () => (state.hidePast ? state.events.filter((ev) => !isPast(ev)) : state.events);
+  // An ignored event (by VMS id) is left out everywhere: not loaded, not in the picker unless "Show ignored" is on.
+  const isIgnored = (ev) => state.ignored.has(String(ev.vmsId || ev.id));
+  const pastOk = (ev) => !state.hidePast || !isPast(ev);
+  const shownEvents = () => state.events.filter((ev) => pastOk(ev) && !isIgnored(ev));
+  const pickerEvents = () => state.events.filter((ev) => pastOk(ev) && (state.showIgnored || !isIgnored(ev)));
+
+  // Ignore or restore an event. Ignoring also unticks it and drops its loaded data, so nothing of it is counted.
+  function setIgnored(ev, on) {
+    const id = String(ev.vmsId || ev.id);
+    if (on) {
+      state.ignored.add(id);
+      state.selected = new Set([...state.selected].filter((x) => String(x) !== id));
+      state.loaded = state.loaded.filter((l) => String(l.src.ev.id) !== id);
+      state.people = buildPeople(state.loaded);
+      restoreDrafts();
+      state.staffConfirm = false;
+    } else {
+      state.ignored.delete(id);
+      toast('Restored. Tick it and press Refresh to load it again.');
+    }
+    saveDrafts();
+    render();
+  }
 
   async function load() {
     const evs = shownEvents().filter((e) => state.selected.has(e.id));
@@ -1361,7 +1389,7 @@
     if (!keep) headerEl = h('header');
     mainEl = h('main');
     const tabs = h('div', { class: 'tabs' },
-      [['staff', staffLabel()], ['roles', 'Roles'], ['people', 'People (' + state.people.length + ')'], ['find', 'Find volunteers'],
+      [['overview', 'Overview'], ['staff', staffLabel()], ['roles', 'Roles'], ['people', 'People (' + state.people.length + ')'], ['find', 'Find volunteers'],
         ['times', 'Shift times'], ['notify', 'Notify (' + pendingNotifications().length + ')'], ['message', 'Message']].map(([t, label]) => h('button', {
         class: state.tab === t ? 'on' : '',
         onclick: () => { state.tab = t; state.confirming = false; state.staffConfirm = false; state.notify.confirming = false; state.msg.confirming = false; state.toggleKey = ''; state.toTop = true; render(); },
@@ -1450,12 +1478,19 @@
   };
   function eventPicker() {
     const q = eventsCompact ? eventsQuery.trim().toLowerCase() : '';
-    const list = shownEvents();
-    const boxes = list.map((ev) => h('label', { 'data-ev': ev.id, hidden: !evMatches(ev, q), class: isPast(ev) ? 'past' : '' },
+    const list = pickerEvents();
+    const boxes = list.map((ev) => h('label', { 'data-ev': ev.id, hidden: !evMatches(ev, q), class: (isPast(ev) ? 'past ' : '') + (isIgnored(ev) ? 'ignored' : '') },
       h('input', {
-        type: 'checkbox', checked: state.selected.has(ev.id), disabled: state.busy,
+        type: 'checkbox', checked: state.selected.has(ev.id), disabled: state.busy || isIgnored(ev),
         onchange: (e) => { e.target.checked ? state.selected.add(ev.id) : state.selected.delete(ev.id); saveDrafts(); if (eventsCompact) renderHeader(); else clearAll.disabled = state.busy || !state.selected.size; },
-      }), evLabel(ev)));
+      }), evLabel(ev),
+      h('button', { class: 'lnk ignbtn', disabled: state.busy, title: isIgnored(ev) ? 'Bring this event back' : 'Leave this event out of VMS+ (for example, kickoffs)',
+        onclick: (e) => { e.preventDefault(); setIgnored(ev, !isIgnored(ev)); } }, isIgnored(ev) ? 'Restore' : 'Ignore')));
+    const ignoredCount = state.events.filter((ev) => isIgnored(ev)).length;
+    const ignoredToggle = ignoredCount ? h('button', { class: 'lnk evclear', disabled: state.busy,
+      title: 'Ignored events are left out of the picker, loading and every tab',
+      onclick: () => { state.showIgnored = !state.showIgnored; eventsCompact = false; renderHeader(); },
+    }, state.showIgnored ? 'Hide ignored' : 'Show ignored (' + ignoredCount + ')') : null;
     const clearAll = h('button', { class: 'lnk evclear', disabled: state.busy || !state.selected.size,
       onclick: () => { state.selected.clear(); saveDrafts(); renderHeader(); } }, 'Uncheck all');
     const pastCount = state.events.filter(isPast).length;
@@ -1466,7 +1501,7 @@
     const setupToggle = h('button', { class: 'lnk evclear', disabled: state.busy || state.staffApplying,
       title: 'Setup days are the days on an event\'s VMS schedule before the event itself (usually the day before)',
       onclick: () => setShowSetup(!state.showSetup) }, state.showSetup ? 'Hide setup days' : 'Show setup days');
-    if (!eventsCompact) return h('div', { class: 'events' }, boxes, clearAll, pastToggle, setupToggle);
+    if (!eventsCompact) return h('div', { class: 'events' }, boxes, clearAll, pastToggle, ignoredToggle, setupToggle);
     const chosen = list.filter((ev) => state.selected.has(ev.id));
     const label = !chosen.length ? 'Choose events'
       : chosen.length === 1 ? evLabel(chosen[0])
@@ -1491,7 +1526,7 @@
             });
             e.target.parentElement.querySelector('.evnone').hidden = shown > 0;
           } }),
-        h('div', { class: 'evtools' }, clearAll, pastToggle, setupToggle),
+        h('div', { class: 'evtools' }, clearAll, pastToggle, ignoredToggle, setupToggle),
         boxes,
         h('div', { class: 'sub evnone', hidden: list.some((ev) => evMatches(ev, q)) }, list.length ? 'No events match.' : 'No upcoming events.')) : null);
   }
@@ -1540,13 +1575,54 @@
         : 'Tick the events to view together, then press Load. Loading only reads from VMS. Nothing changes in VMS until you confirm it.'));
       return;
     }
-    const views = { staff: staffView, roles: rolesView, people: peopleView, find: findView, times: timesView, notify: notifyView, message: messageView };
+    const views = { overview: overviewView, staff: staffView, roles: rolesView, people: peopleView, find: findView, times: timesView, notify: notifyView, message: messageView };
     mainEl.append(views[state.tab]());
     mainEl.scrollTop = top;
     if (focusKey) {
       const again = [...mainEl.querySelectorAll('[data-fk]')].find((el) => el.dataset.fk === focusKey);
       if (again && !again.disabled) again.focus({ preventScroll: true });
     }
+  }
+
+  // ----- Overview tab: one role, who is assigned to it at each loaded event -----
+
+  function overviewView() {
+    // Every role name across the loaded events (standard roles only), for the picker.
+    const names = new Map();
+    state.loaded.forEach(({ roles }) => roles.forEach((r) => {
+      if (!r.admin && !r.inactive) names.set(r.name.toLowerCase(), r.name);
+    }));
+    const roleNames = [...names.values()].sort((a, b) => a.localeCompare(b));
+    if (!roleNames.length) return h('div', { class: 'msg' }, 'None of the loaded events has a role to show.');
+    if (!roleNames.some((n) => n.toLowerCase() === (state.overviewRole || '').toLowerCase())) state.overviewRole = roleNames[0];
+    const role = state.overviewRole;
+
+    // One row per loaded event (per day for multi-day events) that has this role.
+    const rows = state.loaded.filter((l) => roleIn(l, role));
+    const missing = state.loaded.length - rows.length;
+    const person = (v) => {
+      const told = (v.Assignments || []).some((a) => a.IsNotified);
+      return h('span', { class: 'chip' }, fullName(v), told ? '' : h('span', { class: 'muted' }, ' (not notified)'));
+    };
+
+    return h('div', { class: 'overview' },
+      h('div', { class: 'row' },
+        h('label', {}, 'Role ',
+          h('select', { onchange: (e) => { state.overviewRole = e.target.value; renderMain(); } },
+            roleNames.map((n) => h('option', { value: n, selected: n === role }, n)))),
+        h('span', { class: 'muted' }, plural(rows.length, 'event') + ' with this role'
+          + (missing ? ' · ' + missing + ' without it' : ''))),
+      rows.length ? h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Event'), h('th', {}, 'Target'), h('th', {}, 'Assigned'), h('th', {}, ''))),
+        h('tbody', {}, rows.map((l) => {
+          const r = roleIn(l, role);
+          return h('tr', {},
+            h('td', {}, evLabel(l.ev)),
+            h('td', {}, r.counts && r.counts.target != null ? String(r.counts.target) : '—'),
+            h('td', {}, r.assigned.length ? r.assigned.map(person) : h('span', { class: 'muted' }, 'No one yet')),
+            h('td', {}, h('button', { class: 'lnk', title: 'Leave this event out of VMS+',
+              onclick: () => setIgnored(l.ev, true) }, 'Ignore event')));
+        }))) : h('div', { class: 'msg' }, 'No loaded event has ' + role + '.'));
   }
 
   // ----- Roles tab -----
