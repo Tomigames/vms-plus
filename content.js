@@ -1768,13 +1768,22 @@
           reportRows(ev.id, 27, ['Email', 'Date Applied', 'Role', 'Assignment Status']),
         ]);
         const nameOf = (r) => ((r['Preferred First Name'] || r['Legal First Name'] || '') + ' ' + (r['Last Name'] || '')).trim();
-        pv.data.set(ev.id, {
-          ev,
-          people: assigned.map((r) => ({ name: nameOf(r), email: (r.Email || '').toLowerCase(),
-            roles: (r['Roles Assigned'] || '').split(/,|;/).map((s) => cleanRole(s)).filter(Boolean) })),
-          applicants: apps.filter((r) => /applied/i.test(r['Assignment Status'] || '')).map((r) => ({
-            name: nameOf(r), email: (r.Email || '').toLowerCase(), role: cleanRole(r.Role || '') })),
+        // The reports have one row per person per day, so a multi-day event repeats people. Keep one row each.
+        const people = new Map();
+        assigned.forEach((r) => {
+          const email = (r.Email || '').toLowerCase(), name = nameOf(r), key = email || name;
+          const roles = (r['Roles Assigned'] || '').split(/,|;/).map((s) => cleanRole(s)).filter(Boolean);
+          if (!people.has(key)) people.set(key, { name, email, roles: [] });
+          const p = people.get(key);
+          roles.forEach((role) => { if (!p.roles.includes(role)) p.roles.push(role); });
         });
+        const applicants = new Map();
+        apps.filter((r) => /applied/i.test(r['Assignment Status'] || '')).forEach((r) => {
+          const email = (r.Email || '').toLowerCase(), name = nameOf(r), role = cleanRole(r.Role || '');
+          const key = (email || name) + '|' + role.toLowerCase();
+          if (!applicants.has(key)) applicants.set(key, { name, email, role });
+        });
+        pv.data.set(ev.id, { ev, people: [...people.values()], applicants: [...applicants.values()] });
       } catch (e) { pv.data.set(ev.id, { ev, error: e.message }); }
       done++;
       pv.progress = 'Loading ' + done + ' of ' + evs.length + ' events…';
