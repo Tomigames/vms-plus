@@ -1406,7 +1406,10 @@
     const tick = (d, t) => { done += d; total += t; state.progress = 'Loading ' + done + ' of ' + total + ' lists…'; renderHeader(); };
     try {
       const out = [];
-      for (const ev of evs) out.push(...splitDays(await loadEvent(ev, tick)));
+      // Three events at a time, so VMS is never left idle between events. The request limit still applies across all of them.
+      const perEvent = new Array(evs.length);
+      await pool(evs.map((_, i) => i), 3, async (i) => { perEvent[i] = splitDays(await loadEvent(evs[i], tick)); });
+      perEvent.forEach((days) => out.push(...days));
       state.loaded = out;
       state.people = buildPeople(out);
       restoreDrafts();
