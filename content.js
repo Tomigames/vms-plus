@@ -1421,7 +1421,7 @@
 
   let headerEl, mainEl, tabsEl;
   const panelEl = h('aside', { class: 'panel', hidden: true });
-  const staffLabel = () => 'Staffing' + (state.staged.length ? ' (' + state.staged.length + ' staged)' : '');
+  const staffLabel = () => 'Preview Role' + (state.staged.length ? ' (' + state.staged.length + ' staged)' : '');
   function render() {
     // Redrawing must not move the page: keep the scroll position, except when changing tab.
     const top = mainEl && !state.toTop ? mainEl.scrollTop : 0;
