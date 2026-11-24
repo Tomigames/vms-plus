@@ -381,6 +381,18 @@
     });
     return out;
   }
+  // Volunteer Coordinators are not in VMS's role lists. The Assigned Volunteers report (19) lists them under Roles Assigned.
+  const COORD_KEY = 'volunteer coordinator';
+  async function loadCoordinators(evId) {
+    const seen = new Map();
+    (await reportRows(evId, 19, ['Email', 'Roles Assigned'])).forEach((r) => {
+      if (!/volunteer coordinator/i.test(r['Roles Assigned'] || '')) return;
+      const email = (r.Email || '').toLowerCase();
+      const name = ((r['Preferred First Name'] || r['Legal First Name'] || '') + ' ' + (r['Last Name'] || '')).trim();
+      if (name && !seen.has(email + '|' + name)) seen.set(email + '|' + name, { name, email });
+    });
+    return [...seen.values()];
+  }
   const fmtDay = (ts) => { const d = new Date(ts); return (d.getMonth() + 1) + '/' + d.getDate(); };
 
   // ---------- Multi-day events ----------
@@ -549,6 +561,19 @@
         admin: !counts.has(name.toLowerCase()),
         assigned: [], applicants: [],
       };
+    });
+    // VMS's role list leaves out some roles that the event page still shows with their counts (an inactive
+    // FIRST Technical Advisor, for example). Each event-page role link gives its ID, so add the missing ones.
+    const known = new Set(roles.map((r) => r.id + ':' + r.custom));
+    doc.querySelectorAll('a[href*="RoleScheduling.aspx"]').forEach((a) => {
+      const u = new URL(a.getAttribute('href'), 'https://my.firstinspires.org/VMS/Events/');
+      const id = Number(u.searchParams.get('RoleID'));
+      const custom = /^true$/i.test(u.searchParams.get('IsCustom') || '');
+      const name = cleanRole(txt(a));
+      if (!id || !name || known.has(id + ':' + custom)) return;
+      known.add(id + ':' + custom);
+      roles.push({ id, custom, key: false, inactive: false, name, counts: counts.get(name.toLowerCase()) || null,
+        admin: false, assigned: [], applicants: [] });
     });
     let appliedDates = new Map(), training = new Map(), lastSeason = new Map();
     let sched = prev ? prev.sched : null;
@@ -1632,20 +1657,25 @@
       if (!roles.has(k)) roles.set(k, { name: r.name, admin: true });
       if (!r.admin) roles.get(k).admin = false;
     }));
+    // Volunteer Coordinator comes from the Assigned Volunteers report, not the role lists, so it is always offered.
+    if (!roles.has(COORD_KEY)) roles.set(COORD_KEY, { name: 'Volunteer Coordinator', admin: true });
     const roleList = [...roles.values()].sort((a, b) => (a.admin - b.admin) || a.name.localeCompare(b.name));
-    if (!roleList.length) return h('div', { class: 'msg' }, 'None of the loaded events has a role to show.');
     if (!roles.has((state.overviewRole || '').toLowerCase())) state.overviewRole = roleList[0].name;
     const role = state.overviewRole;
     const key = role.toLowerCase();
-    const isAdminRole = roles.get(key).admin;
 
-    // One row per event that has this role on the event (in any day's column).
-    const rows = events.map((raw) => ({ raw, r: raw.roles.find((x) => x.name.toLowerCase() === key && !x.inactive) })).filter((x) => x.r);
+    // One row per event that has this role on the event (in any day's column). people: null while still being read.
+    const rows = events.map((raw) => {
+      if (key === COORD_KEY) {
+        return { raw, people: Array.isArray(raw.coordinators) ? raw.coordinators.map((c) => ({ name: c.name, told: true })) : null, target: null };
+      }
+      const r = raw.roles.find((x) => x.name.toLowerCase() === key && !x.inactive);
+      if (!r) return null;
+      return { raw, people: r.assigned.map((v) => ({ name: fullName(v), told: (v.Assignments || []).some((a) => a.IsNotified) })),
+        target: !r.admin && r.counts && r.counts.target != null ? r.counts.target : null };
+    }).filter(Boolean);
     const missing = events.length - rows.length;
-    const person = (v) => {
-      const told = (v.Assignments || []).some((a) => a.IsNotified);
-      return h('span', { class: 'chip' }, fullName(v), told ? '' : h('span', { class: 'muted' }, ' (not notified)'));
-    };
+    const person = (p) => h('span', { class: 'chip' }, p.name, p.told ? '' : h('span', { class: 'muted' }, ' (not notified)'));
     const when = (raw) => (raw.ev.date ? raw.ev.date.replace(/\/\d{4}$/, '') + ' · ' : '') + raw.ev.name
       + (raw.ev.days > 1 ? ' (' + raw.ev.days + ' days)' : '');
 
@@ -1659,10 +1689,11 @@
           + (missing ? ' · ' + missing + ' without it' : ''))),
       rows.length ? h('table', {},
         h('thead', {}, h('tr', {}, h('th', {}, 'Event'), h('th', {}, 'Target'), h('th', {}, 'Assigned'), h('th', {}, ''))),
-        h('tbody', {}, rows.map(({ raw, r }) => h('tr', {},
+        h('tbody', {}, rows.map(({ raw, people, target }) => h('tr', {},
           h('td', {}, when(raw)),
-          h('td', {}, isAdminRole || !r.counts || r.counts.target == null ? '—' : String(r.counts.target)),
-          h('td', {}, r.assigned.length ? r.assigned.map(person) : h('span', { class: 'muted' }, 'No one yet')),
+          h('td', {}, target == null ? '—' : String(target)),
+          h('td', {}, people === null ? h('span', { class: 'muted' }, 'Checking…')
+            : people.length ? people.map(person) : h('span', { class: 'muted' }, 'No one yet')),
           h('td', {}, h('button', { class: 'lnk', title: 'Leave this event out of VMS+',
             onclick: () => setIgnored(raw.ev, true) }, 'Ignore event')))))) : h('div', { class: 'msg' }, 'No loaded event has ' + role + '.'));
   }
@@ -2762,6 +2793,16 @@
             target.unchecked = false;
             if (Array.isArray(rows) && rows.length) { target.assigned = rows; rebuild(cur); }
           }
+          continue;
+        }
+        // Coordinators, one report per event, for Overview and the people tabs.
+        const coordsWanted = ['overview', 'people', 'staff', 'find', 'notify', 'message'].includes(state.tab);
+        const cq = coordsWanted ? state.loaded.find((l) => !Array.isArray(l.src.coordinators)) : null;
+        if (cq) {
+          let list = [];
+          try { list = await loadCoordinators(cq.ev.vmsId); } catch (e) { if (Date.now() < blockedUntil) throw e; }
+          cq.src.coordinators = list;
+          if (state.tab === 'overview') renderMain();
           continue;
         }
         // Everything below is only for the tabs that show people. Overview, Roles and Shift times wait until one is opened.
