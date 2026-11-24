@@ -550,6 +550,19 @@
         assigned: [], applicants: [],
       };
     });
+    // VMS's role list leaves out some roles that the event page still shows with their counts (an inactive
+    // FIRST Technical Advisor, for example). Each event-page role link gives its ID, so add the missing ones.
+    const known = new Set(roles.map((r) => r.id + ':' + r.custom));
+    doc.querySelectorAll('a[href*="RoleScheduling.aspx"]').forEach((a) => {
+      const u = new URL(a.getAttribute('href'), 'https://my.firstinspires.org/VMS/Events/');
+      const id = Number(u.searchParams.get('RoleID'));
+      const custom = /^true$/i.test(u.searchParams.get('IsCustom') || '');
+      const name = cleanRole(txt(a));
+      if (!id || !name || known.has(id + ':' + custom)) return;
+      known.add(id + ':' + custom);
+      roles.push({ id, custom, key: false, inactive: false, name, counts: counts.get(name.toLowerCase()) || null,
+        admin: false, assigned: [], applicants: [] });
+    });
     let appliedDates = new Map(), training = new Map(), lastSeason = new Map();
     let sched = prev ? prev.sched : null;
     const before = prev ? new Map(prev.roles.map((r) => [r.id + ':' + r.custom, r])) : null;
