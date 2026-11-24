@@ -1730,6 +1730,126 @@
             onclick: () => setIgnored(raw.ev, true) }, 'Ignore event')))))) : h('div', { class: 'msg' }, 'No loaded event has ' + role + '.'));
   }
 
+  // ----- VMS-: a read-only preview, built only from VMS's reports -----
+  // Per event: the Assigned Volunteers report (19) and the applications report (27), two exports each. It changes
+  // nothing in VMS and does not read the per-role lists that the change tools need.
+  const pv = { order: [], data: new Map(), role: '', busy: false, progress: '', error: '' };
+  const pvRoot = h('div', { class: 'root', hidden: true });
+  const pvLaunch = h('button', { class: 'launch', style: 'right: 100px', title: 'Read-only preview, built from VMS reports. Changes nothing.',
+    onclick: () => openPreview() }, 'VMS-');
+  shadow.append(pvLaunch, pvRoot);
+
+  function openPreview() {
+    root.hidden = true; launch.hidden = true;
+    pvRoot.hidden = false; pvLaunch.hidden = true;
+    if (!pv.data.size && !pv.busy) previewLoad(); else renderPreview();
+  }
+  function closePreview() {
+    pvRoot.hidden = true; pvLaunch.hidden = false; launch.hidden = false;
+  }
+
+  async function previewLoad() {
+    if (pv.busy) return;
+    pv.error = '';
+    if (!state.events.length) {
+      try { state.events = await listEvents(); } catch (e) { pv.error = e.message; renderPreview(); return; }
+    }
+    if (!state.selected.size) state.selected = new Set(saved.selected || []);
+    const evs = shownEvents().filter((e) => state.selected.has(e.id));
+    pv.data = new Map(); pv.order = evs.map((e) => e.id);
+    if (!evs.length) { pv.error = 'Tick events in VMS+ first, then press Load here.'; renderPreview(); return; }
+    pv.busy = true; pv.progress = 'Loading 0 of ' + evs.length + ' events…';
+    renderPreview();
+    let done = 0;
+    await pool(evs, 3, async (ev) => {
+      try {
+        const [assigned, apps] = await Promise.all([
+          reportRows(ev.id, 19, ['Email', 'Roles Assigned']),
+          reportRows(ev.id, 27, ['Email', 'Date Applied', 'Role', 'Assignment Status']),
+        ]);
+        const nameOf = (r) => ((r['Preferred First Name'] || r['Legal First Name'] || '') + ' ' + (r['Last Name'] || '')).trim();
+        pv.data.set(ev.id, {
+          ev,
+          people: assigned.map((r) => ({ name: nameOf(r), email: (r.Email || '').toLowerCase(),
+            roles: (r['Roles Assigned'] || '').split(/,|;/).map((s) => cleanRole(s)).filter(Boolean) })),
+          applicants: apps.filter((r) => /applied/i.test(r['Assignment Status'] || '')).map((r) => ({
+            name: nameOf(r), email: (r.Email || '').toLowerCase(), role: cleanRole(r.Role || '') })),
+        });
+      } catch (e) { pv.data.set(ev.id, { ev, error: e.message }); }
+      done++;
+      pv.progress = 'Loading ' + done + ' of ' + evs.length + ' events…';
+      renderPreview();
+    });
+    pv.busy = false; pv.progress = 'Loaded ' + evs.length + ' events';
+    renderPreview();
+  }
+
+  // Every role name seen in the reports, for the picker.
+  function pvRoleNames() {
+    const m = new Map();
+    pv.data.forEach((d) => {
+      (d.people || []).forEach((p) => p.roles.forEach((r) => m.set(r.toLowerCase(), r)));
+      (d.applicants || []).forEach((a) => a.role && m.set(a.role.toLowerCase(), a.role));
+    });
+    return [...m.values()].sort((a, b) => a.localeCompare(b));
+  }
+
+  function exportPreview() {
+    const cell = (v) => { const s = v == null ? '' : String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const rows = [['Event', 'Dates', 'Role', 'Status', 'Name', 'Email']];
+    pv.order.forEach((id) => {
+      const d = pv.data.get(id);
+      if (!d || d.error) return;
+      const dates = (d.ev.date || '') + (d.ev.days > 1 ? ' (' + d.ev.days + ' days)' : '');
+      d.people.forEach((p) => p.roles.forEach((r) => rows.push([d.ev.name, dates, r, 'Assigned', p.name, p.email])));
+      d.applicants.forEach((a) => rows.push([d.ev.name, dates, a.role, 'Applied', a.name, a.email]));
+    });
+    const url = URL.createObjectURL(new Blob(['﻿' + rows.map((r) => r.map(cell).join(',')).join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' }));
+    const a = h('a', { href: url, download: 'vms-minus-preview.csv' });
+    document.documentElement.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast(plural(rows.length - 1, 'row') + ' exported.');
+  }
+
+  function renderPreview() {
+    pvRoot.replaceChildren();
+    const roles = pvRoleNames();
+    if (!roles.some((r) => r.toLowerCase() === pv.role.toLowerCase())) pv.role = roles[0] || '';
+    const key = pv.role.toLowerCase();
+    pvRoot.append(h('header', {},
+      h('h1', {}, 'VMS-'),
+      h('span', { class: 'muted status' }, pv.busy ? h('span', { class: 'spin', 'aria-hidden': 'true' }) : null, pv.error || pv.progress),
+      roles.length ? h('select', { onchange: (e) => { pv.role = e.target.value; renderPreview(); } },
+        roles.map((r) => h('option', { value: r, selected: r.toLowerCase() === key }, r))) : null,
+      h('button', { class: 'primary', disabled: pv.busy, onclick: previewLoad }, 'Load'),
+      h('button', { disabled: !pv.data.size, onclick: exportPreview }, 'Export CSV'),
+      h('button', { onclick: closePreview }, 'Close')));
+    const body = h('main', {});
+    if (!pv.data.size) {
+      body.append(h('div', { class: 'msg' }, pv.busy ? 'Working…' : 'Nothing loaded yet. Press Load.'));
+    } else if (!roles.length) {
+      body.append(h('div', { class: 'msg' }, 'No assigned volunteers or applicants in these events.'));
+    } else {
+      body.append(h('div', { class: 'sub' }, 'Read-only. Changes nothing in VMS. Built from the Assigned Volunteers and application reports.'));
+      body.append(h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Event'), h('th', {}, 'Assigned to ' + pv.role), h('th', {}, 'Applied for ' + pv.role))),
+        h('tbody', {}, pv.order.map((id) => {
+          const d = pv.data.get(id);
+          if (!d) return null;
+          if (d.error) return h('tr', {}, h('td', {}, evLabel(d.ev)), h('td', { colspan: 2 }, h('span', { class: 'muted' }, 'Could not load: ' + d.error)));
+          const who = d.people.filter((p) => p.roles.some((r) => r.toLowerCase() === key));
+          const apps = d.applicants.filter((a) => a.role.toLowerCase() === key);
+          return h('tr', {},
+            h('td', {}, evLabel(d.ev)),
+            h('td', {}, who.length ? who.map((p) => h('span', { class: 'chip' }, p.name)) : h('span', { class: 'muted' }, 'No one')),
+            h('td', {}, apps.length ? apps.map((a) => h('span', { class: 'chip' }, a.name)) : h('span', { class: 'muted' }, 'No one')));
+        }))));
+    }
+    pvRoot.append(body);
+  }
+
   // ----- Roles tab -----
 
   function rolesView() {
