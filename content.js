@@ -1412,7 +1412,7 @@
       [['overview', 'Overview'], ['staff', staffLabel()], ['roles', 'Roles'], ['people', 'People (' + state.people.length + ')'], ['find', 'Find volunteers'],
         ['times', 'Shift times'], ['notify', 'Notify (' + pendingNotifications().length + ')'], ['message', 'Message']].map(([t, label]) => h('button', {
         class: state.tab === t ? 'on' : '',
-        onclick: () => { state.tab = t; state.confirming = false; state.staffConfirm = false; state.notify.confirming = false; state.msg.confirming = false; state.toggleKey = ''; state.toTop = true; render(); },
+        onclick: () => { state.tab = t; state.confirming = false; state.staffConfirm = false; state.notify.confirming = false; state.msg.confirming = false; state.toggleKey = ''; state.toTop = true; render(); background(); },
       }, label)),
       h('button', { class: 'lnk diagbtn', title: 'Copy version, load details and recent errors to paste into a bug report. No names or emails.',
         onclick: (e) => copyDiagnostics(e.currentTarget) }, 'Copy diagnostics'));
@@ -2764,6 +2764,8 @@
           }
           continue;
         }
+        // Everything below is only for the tabs that show people. Overview, Roles and Shift times wait until one is opened.
+        if (!['people', 'staff', 'find', 'notify', 'message'].includes(state.tab)) break;
         const x = state.loaded.find((l) => l.src.extrasPending);
         if (x) {
           const vmsId = x.ev.vmsId;
