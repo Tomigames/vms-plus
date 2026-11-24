@@ -1439,6 +1439,7 @@
     const tabs = h('div', { class: 'tabs' },
       [['overview', 'Overview'], ['staff', staffLabel()], ['roles', 'Roles'], ['people', 'People (' + state.people.length + ')'], ['find', 'Find volunteers'],
         ['times', 'Shift times'], ['notify', 'Notify (' + pendingNotifications().length + ')'], ['message', 'Message']].map(([t, label]) => h('button', {
+        'data-tab': t,
         class: state.tab === t ? 'on' : '',
         onclick: () => { state.tab = t; state.confirming = false; state.staffConfirm = false; state.notify.confirming = false; state.msg.confirming = false; state.toggleKey = ''; state.toTop = true; render(); background(); },
       }, label)),
@@ -1609,7 +1610,9 @@
   function renderMain() {
     saveDrafts();
     timesDirty = false;
-    if (tabsEl && tabsEl.firstChild) tabsEl.firstChild.textContent = staffLabel();
+    // Only the Staffing (Preview Role) button's label changes with the staged count.
+    const staffTab = tabsEl && tabsEl.querySelector('button[data-tab="staff"]');
+    if (staffTab) staffTab.textContent = staffLabel();
     const top = mainEl.scrollTop;
     // A box marked with data-fk keeps the keyboard focus across a redraw.
     const was = shadow.activeElement;
