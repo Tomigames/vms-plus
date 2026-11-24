@@ -1638,6 +1638,34 @@
 
   // ----- Overview tab: one role, who is assigned to it at each loaded event -----
 
+  // Every loaded assignment, one row per person per role per event, as a CSV file. Uses what is already loaded,
+  // so it makes no VMS requests. Multi-day events are one event (their days are in the dates column).
+  function exportAssignments() {
+    const cell = (v) => { const s = v == null ? '' : String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const rows = [['Event', 'Dates', 'VMS event ID', 'Role', 'Person', 'Email', 'Notified']];
+    const seen = new Set();
+    state.loaded.forEach((l) => {
+      const raw = l.src || l;
+      if (seen.has(raw)) return;
+      seen.add(raw);
+      const dates = (raw.ev.date || '') + (raw.ev.days > 1 ? ' (' + raw.ev.days + ' days)' : '');
+      raw.roles.forEach((r) => {
+        if (r.inactive) return;
+        (Array.isArray(r.assigned) ? r.assigned : []).forEach((v) => rows.push([raw.ev.name, dates, raw.ev.id, r.name, fullName(v), v.Email || '',
+          (v.Assignments || []).some((a) => a.IsNotified) ? 'Yes' : 'No']));
+      });
+      (Array.isArray(raw.coordinators) ? raw.coordinators : []).forEach((c) => rows.push([raw.ev.name, dates, raw.ev.id, 'Volunteer Coordinator', c.name, c.email, '']));
+    });
+    const csv = '﻿' + rows.map((r) => r.map(cell).join(',')).join('\r\n') + '\r\n';
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const a = h('a', { href: url, download: 'vms-plus-assignments.csv' });
+    document.documentElement.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast(plural(rows.length - 1, 'assignment') + ' exported.');
+  }
+
   function overviewView() {
     // One entry per VMS event (not per day). Each loaded day points back to its event through `src`.
     const events = [];
@@ -1686,7 +1714,8 @@
             roleList.map((x) => h('option', { value: x.name, selected: x.name.toLowerCase() === key },
               x.admin ? x.name + ' (coordinator, not on event page)' : x.name)))),
         h('span', { class: 'muted' }, plural(rows.length, 'event') + ' with this role'
-          + (missing ? ' · ' + missing + ' without it' : ''))),
+          + (missing ? ' · ' + missing + ' without it' : '')),
+        h('button', { class: 'lnk', title: 'Every loaded assignment, for all roles, as a spreadsheet file', onclick: exportAssignments }, 'Export all to CSV')),
       rows.length ? h('table', {},
         h('thead', {}, h('tr', {}, h('th', {}, 'Event'), h('th', {}, 'Target'), h('th', {}, 'Assigned'), h('th', {}, ''))),
         h('tbody', {}, rows.map(({ raw, people, target }) => h('tr', {},
